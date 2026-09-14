@@ -1,0 +1,18 @@
+"use client";
+
+import { useQuery } from "@tanstack/react-query";
+import { Shell, PageHeader } from "@/components/chrome";
+import { FixtureCard } from "@/components/fixture-card";
+import { api } from "@/lib/api";
+
+function Metric({ label, value, note }: { label: string; value: string; note: string }) { return <div className="rounded-2xl border border-line bg-panel/80 p-5"><p className="text-xs uppercase tracking-[.15em] text-slate-500">{label}</p><p className="mt-4 text-3xl font-semibold text-white">{value}</p><p className="mt-2 text-xs text-slate-500">{note}</p></div>; }
+
+export default function Dashboard() {
+  const fixtures = useQuery({ queryKey: ["fixtures", "today"], queryFn: () => api.fixtures() });
+  const live = useQuery({ queryKey: ["fixtures", "live"], queryFn: () => api.fixtures("/api/fixtures/live") });
+  const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers });
+  return <Shell><PageHeader eyebrow="Overview / data terminal" title="Good data makes better decisions."><div className="rounded-full border border-mint/30 bg-mint/10 px-4 py-2 text-xs font-semibold text-mint">● Phase 1 · data foundation</div></PageHeader><section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Metric label="Football today" value={fixtures.data?.filter(f => f.sport === "football").length.toString() || "—"} note="Normalized fixtures"/><Metric label="Basketball today" value={fixtures.data?.filter(f => f.sport === "basketball").length.toString() || "—"} note="Normalized games"/><Metric label="Live now" value={live.data?.length.toString() || "—"} note="Current provider view"/><Metric label="Providers" value={providers.data?.filter(p => p.configured).length.toString() || "—"} note="Configured server-side"/></section><section className="mt-10 grid gap-8 xl:grid-cols-[1fr_340px]"><div><div className="mb-4 flex items-end justify-between"><div><p className="text-xs uppercase tracking-[.18em] text-slate-500">Today</p><h2 className="mt-2 text-xl font-semibold text-white">Upcoming fixtures</h2></div><a className="text-sm text-mint" href="/fixtures">View all →</a></div>{fixtures.isPending ? <State text="Loading real fixture data…"/> : fixtures.isError ? <State text="Provider data unavailable. Configure a key or ingest data from the backend." error/> : fixtures.data?.length ? <div className="grid gap-4 md:grid-cols-2">{fixtures.data.slice(0, 6).map(f => <FixtureCard key={f.id} fixture={f}/>)}</div> : <State text="No fixtures loaded for today. The API does not substitute demo matches."/>}</div><aside className="rounded-2xl border border-line bg-panel/80 p-5"><p className="text-xs uppercase tracking-[.18em] text-slate-500">Data sources</p><h2 className="mt-2 text-xl font-semibold text-white">Provider health</h2><div className="mt-6 space-y-4">{providers.isPending ? <State text="Checking…"/> : providers.data?.map(p => <div key={p.provider} className="flex items-center justify-between border-b border-line pb-4 last:border-0"><div><p className="text-sm font-medium text-white">{p.provider.replace("api-", "API-")}</p><p className="mt-1 text-xs text-slate-500">{p.configured ? `${p.calls_today} calls today` : "Provider not configured"}</p></div><span className={`h-2.5 w-2.5 rounded-full ${p.healthy ? "bg-mint" : p.configured ? "bg-amber" : "bg-slate-600"}`}/></div>)}</div><p className="mt-3 text-xs leading-5 text-slate-500">Freshness and provider status remain visible; SlipIQ never turns missing data into fake confidence.</p></aside></section></Shell>;
+}
+
+function State({ text, error = false }: { text: string; error?: boolean }) { return <div className={`rounded-2xl border border-dashed p-8 text-sm ${error ? "border-amber/50 text-amber" : "border-line text-slate-500"}`}>{text}</div>; }
+

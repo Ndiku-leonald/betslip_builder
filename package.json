@@ -1,0 +1,12 @@
+{
+  "name": "slipiq",
+  "private": true,
+  "scripts": {
+    "backend:test": "python -m pytest apps/api/tests",
+    "backend:migrate": "alembic -c apps/api/alembic.ini upgrade head",
+    "web:dev": "npm --prefix apps/web run dev",
+    "web:build": "npm --prefix apps/web run build",
+    "web:test": "npm --prefix apps/web run test"
+  }
+}
+

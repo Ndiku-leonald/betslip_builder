@@ -6,8 +6,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.evaluation.backtest import walk_forward
+from app.evaluation.backtest import _scalar_probability, walk_forward
 from app.evaluation.baselines import evaluate_baselines
+from app.evaluation.splits import chronological_split
 from app.calibration.calibrator import MarketCalibrator, SigmoidCalibrator
 from app.features.common import FeatureRow
 from app.features.football import FootballFeatureEngine
@@ -17,7 +18,7 @@ from app.historical.ingest import normalize_basketball_stats, normalize_football
 from app.models import Fixture, ModelVersion
 from app.prediction.basketball import BasketballExpectedScoreModel
 from app.prediction.football import FootballPoissonModel
-from app.prediction.service import PredictionService, PredictionUnavailable
+from app.prediction.service import PredictionService, PredictionUnavailable, distribution_certainty
 from app.providers.api_sports import normalize_football
 from app.providers.api_sports import ApiSportsProvider, ProviderError
 from app.cache import MemoryCache
@@ -171,3 +172,63 @@ def test_feature_engine_is_strictly_pre_match_and_chronological():
     assert "target_home_goals" not in target.values and target.actual is None
     assert target.data_quality["history_count"] >= 2
     assert target.data_cutoff_at == datetime(2024, 1, 12, 12, tzinfo=timezone.utc)
+
+
+def test_chronological_split_keeps_same_timestamp_group_atomic():
+    rows = []
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    for group in range(6):
+        for item in range(2 if group == 2 else 1):
+            rows.append(football_row(group * 10 + item))
+            rows[-1].fixture_id = f"{group}-{item}"
+            rows[-1].data_cutoff_at = start + timedelta(days=group)
+    train, validation, test, metadata = chronological_split(rows)
+    partitions = [set(row.data_cutoff_at for row in part) for part in (train, validation, test)]
+    assert len(set.union(*partitions)) == 6
+    assert not (partitions[0] & partitions[1] or partitions[1] & partitions[2] or partitions[0] & partitions[2])
+    assert all(sum(cutoff in group for group in metadata["cutoffs"]) == 1 for cutoff in set.union(*partitions))
+
+
+def test_walk_forward_fold_metadata_has_disjoint_timestamp_partitions():
+    rows = []
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    for group in range(12):
+        for item in range(2):
+            row = football_row(group * 10 + item)
+            row.fixture_id = f"{group}-{item}"
+            row.data_cutoff_at = start + timedelta(days=group)
+            rows.append(row)
+    result = walk_forward(rows, FootballPoissonModel, minimum_train=4, validation_size=2, test_size=2)
+    for fold in result["folds"]:
+        assert fold["training_cutoff"] < fold["validation_start"] < fold["test_start"]
+        assert len(fold["test_fixture_ids"]) == fold["test_fixture_count"]
+
+
+def test_true_poisson_baseline_is_not_training_frequency_and_matches_test_ids():
+    rows = [football_row(i, 3 if i < 6 else 0, 0 if i < 6 else 2) for i in range(12)]
+    result = evaluate_baselines(rows, "football")
+    poisson = result["league_average_poisson"]
+    frequency = result["league_frequency_1x2"]
+    assert poisson["test_fixture_ids"] == frequency["test_fixture_ids"]
+    assert poisson["home_mean"] != poisson["away_mean"]
+    assert np.isclose(sum(poisson["probabilities"].values()), 1)
+    assert poisson["probabilities"] != frequency["probabilities"]
+
+
+def test_confidence_distribution_certainty_direction_is_unambiguous():
+    even = distribution_certainty({"home_win": 1 / 3, "draw": 1 / 3, "away_win": 1 / 3}, "football")
+    separated = distribution_certainty({"home_win": .8, "draw": .1, "away_win": .1}, "football")
+    assert even < separated
+
+
+def test_market_calibration_status_is_per_market_and_partial():
+    calibrator = MarketCalibrator().fit({"home_win": [.6] * 20, "draw": [.2] * 2}, {"home_win": [i % 2 for i in range(20)], "draw": [0, 1]})
+    assert calibrator.status_by_market(("home_win", "draw", "over_2_5"))["home_win"] == "fitted"
+    assert calibrator.status_by_market(("home_win", "draw", "over_2_5"))["draw"] == "insufficient_samples"
+    assert calibrator.overall_status(("home_win", "draw")) == "partial"
+
+
+def test_handicap_backtest_extracts_scalar_win_probability():
+    assert _scalar_probability({"win": .62, "push": .1, "lose": .28}) == .62
+    result = walk_forward([football_row(i, i % 3, (i + 1) % 2) for i in range(30)], FootballPoissonModel, markets=("home_handicap_-0.5",), minimum_train=10, validation_size=5, test_size=5)
+    assert "handicap" in result["metrics"]["market_families"]

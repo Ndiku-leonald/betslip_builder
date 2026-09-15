@@ -1,24 +1,65 @@
-"""Small deterministic, explicitly synthetic Stage Two pipeline smoke test."""
+"""Deterministic end-to-end TEST DATA pipeline; never a production benchmark."""
+from __future__ import annotations
+
 from datetime import datetime, timedelta, timezone
-from app.features.common import FeatureRow
-from app.prediction.football import FootballPoissonModel
-from app.prediction.basketball import BasketballExpectedScoreModel
-from app.evaluation.backtest import walk_forward
+
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.db import Base
+from app.evaluation.splits import chronological_split
+from app.features.football import FootballFeatureEngine
+from app.models import Fixture, ModelVersion, Prediction
+from app.prediction.service import PredictionService
+from app.providers.api_sports import normalize_football
+from app.services.ingestion import ingest_fixtures
+from app.training.train import train_candidate
+
+
+def _fixture(provider_id, when, status, home_score=None, away_score=None):
+    return normalize_football({
+        "fixture": {"id": provider_id, "date": when.isoformat(), "status": {"short": "FT" if status == "finished" else "NS"}},
+        "league": {"id": 39, "name": "Synthetic TEST DATA", "country": "Test", "season": 2024},
+        "teams": {"home": {"id": 1, "name": "Synthetic Home"}, "away": {"id": 2, "name": "Synthetic Away"}},
+        "goals": {"home": home_score, "away": away_score},
+    })
 
 
 def run() -> None:
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    football, basketball = [], []
-    for index in range(30):
-        when = start + timedelta(days=index)
-        football.append(FeatureRow(str(index), "football", when, {"home_elo": 1500 + index, "away_elo": 1500, "elo_diff": 60 + index, "league_home_goals_avg": 1.3, "league_away_goals_avg": 1.0, "home_goals_for_avg_10": 1.4, "home_goals_against_avg_10": 1.0, "away_goals_for_avg_10": 1.0, "away_goals_against_avg_10": 1.2}, actual={"home_goals": float(index % 3), "away_goals": float((index + 1) % 2), "home_win": float(index % 3 > (index + 1) % 2), "draw": float(index % 3 == (index + 1) % 2), "away_win": float(index % 3 < (index + 1) % 2)}))
-        basketball.append(FeatureRow(str(index), "basketball", when, {"elo_diff": 65, "home_points_for_avg_10": 108, "home_points_against_avg_10": 101, "away_points_for_avg_10": 103, "away_points_against_avg_10": 106}, actual={"home_points": float(100 + index % 12), "away_points": float(96 + index % 10), "home_win": float(index % 4 != 0), "away_win": float(index % 4 == 0), "margin": float(4 + index % 5), "total": float(196 + index % 14)}))
-    football_model = FootballPoissonModel().fit(football); basketball_model = BasketballExpectedScoreModel().fit(basketball)
-    football_result = walk_forward(football, FootballPoissonModel, minimum_train=10, validation_size=5, test_size=5)
-    basketball_result = walk_forward(basketball, BasketballExpectedScoreModel, markets=("home_moneyline", "away_moneyline"), minimum_train=10, validation_size=5, test_size=5)
-    assert football_result["metrics"]["sample_count"] > 0 and basketball_result["metrics"]["sample_count"] > 0
-    assert sum(football_model.predict_distribution(football[0]).flat) > .999 and basketball_model.predict(basketball[0])["expected_total"] > 0
-    print("SYNTHETIC PIPELINE PASS", football_result["metrics"]["sample_count"], basketball_result["metrics"]["sample_count"])
+    historical = []
+    for index in range(28):
+        # Four fixtures share one observation timestamp; the split helper must
+        # keep this group in one partition.
+        group = 12 if index in (12, 13, 14, 15) else index
+        when = start + timedelta(days=group)
+        historical.append(_fixture(index + 1, when, "finished", index % 3, (index + 1) % 2))
+    upcoming = _fixture(999, start + timedelta(days=40), "scheduled")
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        ingest_fixtures(db, historical + [upcoming])
+        rows = FootballFeatureEngine(minimum_history=5).build_and_persist(db, include_unfinished=True)
+        completed = [row for row in rows if row.actual]
+        train_rows, validation_rows, test_rows, split = chronological_split(completed)
+        assert train_rows and validation_rows and test_rows
+        timestamp_sets = [set(row.data_cutoff_at for row in part) for part in (train_rows, validation_rows, test_rows)]
+        assert not (timestamp_sets[0] & timestamp_sets[1] or timestamp_sets[1] & timestamp_sets[2] or timestamp_sets[0] & timestamp_sets[2])
+        version, metrics = train_candidate(db, "football")
+        version.status = "champion"  # controlled test-only activation
+        db.commit()
+        target_id = db.scalar(select(Fixture.id).where(Fixture.provider_fixture_id == "999"))
+        payload = PredictionService(minimum_history=5).generate(db, target_id)
+        persisted = db.scalar(select(Prediction).where(Prediction.fixture_id == target_id))
+        assert persisted is not None and payload["model_version"] == version.version
+        assert payload["calibration_status_by_market"]
+        markets = payload["calibrated_probability"]
+        assert abs(sum(markets[key] for key in ("home_win", "draw", "away_win")) - 1) < 1e-6
+        assert "calibration" in (version.parameters or {})
+        print("SYNTHETIC TEST DATA — NOT REAL MODEL PERFORMANCE")
+        print({"historical_rows": len(completed), "train": len(train_rows), "validation": len(validation_rows), "test": len(test_rows), "model_version": version.version, "prediction_persisted": True, "calibration_status": payload["calibration_status"], "test_metric_families": list(metrics.get("market_families", {}))})
 
 
-if __name__ == "__main__": run()
+if __name__ == "__main__":
+    run()

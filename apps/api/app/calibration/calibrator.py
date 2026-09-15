@@ -42,6 +42,16 @@ class MarketCalibrator:
 
     def _one(self, key: str, value: float) -> float: return self.calibrators[key].transform(value) if key in self.calibrators else float(max(0, min(1, value)))
 
+    def status_by_market(self, markets=None) -> dict[str, str]:
+        keys = list(markets) if markets is not None else list(self.calibrators)
+        return {key: "fitted" if key in self.calibrators and self.calibrators[key].fitted else "insufficient_samples" for key in keys}
+
+    def overall_status(self, markets=None) -> str:
+        statuses = list(self.status_by_market(markets).values())
+        if not statuses or all(status == "insufficient_samples" for status in statuses):
+            return "insufficient_samples"
+        return "fitted" if all(status == "fitted" for status in statuses) else "partial"
+
     def transform(self, markets: dict[str, float]) -> dict[str, float]:
         result = {key: self._one(key, value) if isinstance(value, (int, float)) else value for key, value in markets.items()}
         for group in (("home_win", "draw", "away_win"), ("home_moneyline", "away_moneyline")):

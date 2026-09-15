@@ -78,6 +78,7 @@ class PredictionOut(BaseModel):
     raw_probability: dict = {}
     calibrated_probability: dict = {}
     calibration_status: str | None = None
+    calibration_status_by_market: dict = {}
     data_quality: dict = {}
     confidence_components: dict = {}
     model_confidence_score: float | None = None

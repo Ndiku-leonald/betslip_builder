@@ -11,6 +11,7 @@ SlipIQ is a production-oriented sports data and statistical modeling foundation 
 - Unit/API tests, migration setup, CI, and architecture documentation.
 - Historical backfill commands, normalized team-match statistics, chronological feature snapshots, football Poisson/Dixon-Coles and basketball expected-score baselines.
 - Candidate model versioning, validation-only calibration, walk-forward evaluation, prediction API and a clearly labeled model-estimate tab on fixture pages.
+- Evaluation splits are atomic by exact observation timestamp; same-kickoff fixtures remain in one partition. Candidate and fold-local baseline metrics use identical held-out fixture IDs, including a true league-average Poisson baseline.
 
 ## Architecture
 

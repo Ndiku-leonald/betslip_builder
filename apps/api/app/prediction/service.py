@@ -17,6 +17,19 @@ class PredictionUnavailable(RuntimeError):
     pass
 
 
+def distribution_certainty(markets: dict, sport: str) -> float:
+    """Return a higher-is-better separation score, independent of probability."""
+    keys = ("home_win", "draw", "away_win") if sport == "football" else ("home_moneyline", "away_moneyline")
+    values = [float(markets[key]) for key in keys if key in markets and isinstance(markets[key], (int, float))]
+    if len(values) != len(keys):
+        return 0.0
+    total = sum(values) or 1.0
+    values = [max(1e-12, value / total) for value in values]
+    import math
+    entropy = -sum(value * math.log(value) for value in values)
+    return round(max(0.0, min(100.0, (1.0 - entropy / math.log(len(values))) * 100.0)), 2)
+
+
 class PredictionService:
     def __init__(self, minimum_history: int = 5) -> None: self.minimum_history = minimum_history
 
@@ -48,15 +61,25 @@ class PredictionService:
         calibration_meta = (version.parameters or {}).get("calibration", {})
         calibrator = MarketCalibrator.from_metadata(calibration_meta)
         calibrated_markets = calibrator.transform(raw_markets)
-        fitted = bool(calibration_meta) and all(item.get("fitted", False) for item in calibration_meta.values())
+        market_status = calibrator.status_by_market(raw_markets.keys())
+        # Overall status describes the persisted calibration set.  The
+        # market-specific map still explicitly marks output markets without a
+        # fitted calibrator as insufficient.
+        calibration_status = calibrator.overall_status(calibration_meta.keys()) if calibration_meta else "insufficient_samples"
         quality = row.data_quality.get("overall", 0.0)
         sample = min(100.0, 100.0 * row.data_quality.get("history_count", 0) / max(1, self.minimum_history * 2))
-        calibration_quality = 80.0 if fitted else 35.0
-        uncertainty = max(20.0, min(100.0, 100.0 - abs(output.get("expected_margin", output.get("expected_home_goals", 1.0) - output.get("expected_away_goals", 1.0))) * 3))
-        confidence_components = {"data_quality": quality, "sample_quality": sample, "calibration_quality": calibration_quality, "model_uncertainty": uncertainty, "competition_coverage": row.data_quality.get("competition_coverage", 25.0)}
+        calibration_quality = 100.0 * sum(value == "fitted" for value in market_status.values()) / max(1, len(market_status))
+        family = "1X2" if sport == "football" else "moneyline"
+        family_metrics = (version.metrics or {}).get("market_families", {}).get(family, {})
+        model_stability = max(0.0, min(100.0, 100.0 * (1.0 - float(family_metrics.get("calibrated_ece", 0.65))))) if family_metrics else 30.0
+        competition = row.data_quality.get("competition_coverage", 25.0)
+        confidence_components = {"data_quality": quality, "sample_quality": sample, "calibration_quality": calibration_quality, "competition_coverage": competition, "distribution_certainty": distribution_certainty(calibrated_markets, sport), "model_stability": model_stability}
+        # Calibration and data coverage are safety floors; a separated outcome is
+        # not allowed to hide weak evidence.
         confidence = round(sum(confidence_components.values()) / len(confidence_components), 2)
+        confidence = round(min(confidence, quality, sample, max(calibration_quality, 35.0), competition), 2)
         generated = datetime.now(timezone.utc)
-        payload = {"available": True, "fixture_id": fixture.id, "sport": sport, "generated_at": generated.isoformat(), "data_cutoff_at": row.data_cutoff_at.isoformat(), "model_version": version.version, "model": output.get("model"), **{key: value for key, value in output.items() if key != "model" and key != "markets"}, "markets": calibrated_markets, "raw_probability": raw_markets, "calibrated_probability": calibrated_markets, "calibration_status": "fitted" if fitted else "insufficient_samples", "data_quality": row.data_quality, "confidence_components": confidence_components, "model_confidence_score": confidence, "warnings": ["Model estimate, not bookmaker odds or certainty."]}
+        payload = {"available": True, "fixture_id": fixture.id, "sport": sport, "generated_at": generated.isoformat(), "data_cutoff_at": row.data_cutoff_at.isoformat(), "model_version": version.version, "model": output.get("model"), **{key: value for key, value in output.items() if key != "model" and key != "markets"}, "markets": calibrated_markets, "raw_probability": raw_markets, "calibrated_probability": calibrated_markets, "calibration_status": calibration_status, "calibration_status_by_market": market_status, "data_quality": row.data_quality, "confidence_components": confidence_components, "model_confidence_score": confidence, "warnings": ["Model estimate, not bookmaker odds or certainty."]}
         db.add(Prediction(fixture_id=fixture.id, model_version_id=version.id, sport=sport, generated_at=generated, prediction_type="pre_match", data_cutoff_at=row.data_cutoff_at, features_version=engine.feature_version, payload=payload)); db.commit()
         return payload
 

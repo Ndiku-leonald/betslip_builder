@@ -34,6 +34,7 @@ def _mapping(db: Session, provider: str, entity_type: str, provider_id: str, int
 
 def ingest_fixtures(db: Session, items: list[NormalizedFixture]) -> int:
     for item in items:
+        observed_at = item.observed_at or datetime.now(timezone.utc)
         sport = _get_or_create(db, Sport, {"slug": item.sport}, {"name": item.sport.title()})
         country = None
         if item.country_name:
@@ -53,8 +54,9 @@ def ingest_fixtures(db: Session, items: list[NormalizedFixture]) -> int:
             "competition_id": competition.id, "home_team_id": home.id, "away_team_id": away.id,
             "kickoff_at": item.kickoff_at, "status": item.status, "status_detail": item.status_detail,
             "home_score": item.home_score, "away_score": item.away_score, "period": item.period, "clock": item.clock,
-            "provider_timestamp": item.provider_timestamp, "ingested_at": datetime.now(timezone.utc),
-            "freshness": classify_freshness(status=item.status, provider_timestamp=item.provider_timestamp).value,
+            "provider_timestamp": None, "observed_at": observed_at,
+            "provider_updated_at": item.provider_updated_at, "ingested_at": datetime.now(timezone.utc),
+            "freshness": classify_freshness(status=item.status, observed_at=observed_at, provider_updated_at=item.provider_updated_at).value,
         }
         if fixture is None:
             fixture = Fixture(sport_id=sport.id, provider=item.provider, provider_fixture_id=item.provider_fixture_id, **values)

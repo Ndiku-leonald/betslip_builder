@@ -32,7 +32,7 @@ export default function FixtureDetailPage() {
       <Info label="Competition" value={item.competition || "Unavailable"} />
       <Info label="Status" value={item.status_detail || item.status} />
       <Info label="Score" value={`${item.home_score ?? "—"} – ${item.away_score ?? "—"}`} />
-      <Info label="Data age" value={item.data_age_seconds == null ? "Unknown" : `${item.data_age_seconds}s`} />
+      <Info label="Observation age" value={item.data_age_seconds == null ? "Unknown" : `${item.data_age_seconds}s`} />
     </section>
     <section className="mt-8 rounded-2xl border border-line bg-panel/80 p-5">
       <div className="flex flex-wrap gap-2 border-b border-line pb-4">{detailKinds.map(kind => <button key={kind.key} onClick={() => setActiveKind(kind.key)} className={`rounded-lg px-4 py-2 text-sm ${activeKind === kind.key ? "bg-mint text-ink" : "text-slate-400 hover:bg-white/5"}`}>{kind.label}</button>)}</div>
@@ -48,7 +48,7 @@ function useStateKind() {
 
 function Info({ label, value }: { label: string; value: string }) { return <div className="rounded-xl border border-line bg-panel/70 p-4"><p className="text-xs uppercase tracking-[.15em] text-slate-500">{label}</p><p className="mt-3 text-sm font-medium text-white">{value}</p></div>; }
 
-function DetailState({ detail }: { detail: { available: boolean; data: unknown; stale: boolean; message: string | null } }) {
+function DetailState({ detail }: { detail: { available: boolean; availability: string; data: unknown; stale: boolean; message: string | null } }) {
   if (!detail.available) return <p className="pt-5 text-sm text-slate-500">{detail.message || "This detail is not available from the current provider."}</p>;
   return <pre className="mt-5 max-h-[32rem] overflow-auto rounded-xl bg-ink p-4 text-xs leading-5 text-slate-300">{JSON.stringify(detail.data, null, 2)}</pre>;
 }

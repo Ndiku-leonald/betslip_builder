@@ -12,6 +12,8 @@ def test_football_normalization_maps_live_status_and_scores() -> None:
     assert item.status == "live"
     assert item.home_score == 1
     assert item.clock == "61'"
+    assert item.observed_at is None
+    assert item.provider_updated_at is None
 
 
 def test_basketball_normalization_maps_period_and_total_score() -> None:
@@ -31,4 +33,3 @@ def test_status_normalization_handles_finished_and_unknown() -> None:
     assert normalize_status("football", "FT") == "finished"
     assert normalize_status("basketball", "NS") == "scheduled"
     assert normalize_status("football", "???") == "unknown"
-

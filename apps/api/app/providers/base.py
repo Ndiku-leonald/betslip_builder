@@ -23,8 +23,9 @@ class NormalizedFixture:
     away_score: int | None
     period: str | None
     clock: str | None
-    provider_timestamp: datetime | None
     raw: dict[str, Any]
+    observed_at: datetime | None = None
+    provider_updated_at: datetime | None = None
 
 
 class SportsProvider(Protocol):
@@ -34,4 +35,3 @@ class SportsProvider(Protocol):
     async def fixtures_by_date(self, date: str) -> list[NormalizedFixture]: ...
     async def live_fixtures(self) -> list[NormalizedFixture]: ...
     async def fixture_details(self, provider_fixture_id: str) -> dict[str, Any]: ...
-

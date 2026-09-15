@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -19,7 +19,8 @@ class FixtureOut(BaseModel):
     period: str | None
     clock: str | None
     provider: str
-    provider_timestamp: datetime | None
+    observed_at: datetime | None
+    provider_updated_at: datetime | None
     ingested_at: datetime
     freshness: str
     data_age_seconds: int | None
@@ -33,6 +34,7 @@ class ProviderStatus(BaseModel):
     last_error: str | None
     latency_ms: float | None
     calls_today: int
+    capabilities: dict[str, bool]
 
 
 class ProviderUsageOut(BaseModel):
@@ -52,7 +54,7 @@ class DetailOut(BaseModel):
     fixture_id: str
     provider: str
     available: bool
+    availability: Literal["available", "unsupported", "not_covered", "temporarily_unavailable", "provider_failure"] = "available"
     data: Any = None
     stale: bool = False
     message: str | None = None
-

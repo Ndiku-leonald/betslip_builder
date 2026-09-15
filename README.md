@@ -25,7 +25,7 @@ External API keys stay server-side. Runtime data is real only when a provider is
 - Python 3.11+
 - Node.js 20+
 - PostgreSQL 15+ for production (SQLite is automatic for local development)
-- Redis is optional; SlipIQ has an in-memory fallback
+- Redis is optional; SlipIQ uses Redis when `REDIS_URL` is configured and reachable, with an in-memory fallback when it is unavailable
 
 ## Setup
 
@@ -53,6 +53,8 @@ cd apps/web && npm install
 
 Set `API_FOOTBALL_KEY` and/or `API_BASKETBALL_KEY` in `.env` using keys from the API-Sports dashboard. Never commit `.env`.
 
+Optional quota overrides are `API_FOOTBALL_DAILY_LIMIT` and `API_BASKETBALL_DAILY_LIMIT`. Free mode defaults both providers to 100 outbound requests per UTC day; cache hits do not consume that allowance and retries do.
+
 ## Run
 
 From the repository root, run the backend in one terminal:
@@ -79,9 +81,21 @@ Pop-Location
 
 The backend exposes OpenAPI at http://localhost:8000/docs. The frontend is at http://localhost:3000.
 
+Run the minimal real-provider smoke checks after configuring keys:
+
+```powershell
+Push-Location apps/api
+python -m app.smoke_test
+Pop-Location
+```
+
+Each operation reports `PASS`, `SKIPPED`, or `FAILED`; API keys are never printed. With no keys configured, all provider checks are `SKIPPED`.
+
 ## Quota and freshness
 
-`QUOTA_MODE` accepts `free`, `standard`, or `realtime`. Free mode applies longer cache windows and avoids background polling. Live records retain provider timestamps, ingestion timestamps, and a freshness classification. The API exposes provider usage and health so stale or unavailable data is visible.
+`QUOTA_MODE` accepts `free`, `standard`, or `realtime`. Free mode applies longer cache windows and avoids background polling. Fixture `kickoff_at` is separate from `observed_at` (the successful fetch time); `provider_updated_at` is only populated when the upstream supplies a trustworthy update time. Freshness and `data_age_seconds` use observation time, never kickoff time. The API exposes provider usage and health so stale or unavailable data is visible.
+
+APScheduler is process-local. It is suitable for development and a single-worker deployment only. In production multi-worker FastAPI deployments, run the API with scheduled ingestion disabled in every worker and run one dedicated scheduler process (`ENABLE_SCHEDULED_INGESTION=true`) until a distributed job system is introduced.
 
 ## Real data limitations
 

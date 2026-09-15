@@ -112,7 +112,11 @@ class Fixture(TimestampMixin, Base):
     away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     period: Mapped[str | None] = mapped_column(String(40))
     clock: Mapped[str | None] = mapped_column(String(40))
+    # Kept for compatibility with the immutable Phase 1 migration. It is no longer
+    # used for freshness; kickoff_at is never an observation timestamp.
     provider_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    provider_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     freshness: Mapped[str] = mapped_column(String(30), default=Freshness.UNKNOWN.value)
 
@@ -211,6 +215,7 @@ class ProviderUsage(TimestampMixin, Base):
     status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     cache_hit: Mapped[bool] = mapped_column(Boolean, default=False)
+    external_request: Mapped[bool] = mapped_column(Boolean, default=True)
     rate_limit_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 

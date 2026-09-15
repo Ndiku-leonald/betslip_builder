@@ -3,23 +3,28 @@ from datetime import datetime, timezone
 from app.models import Freshness
 
 
-def data_age_seconds(provider_timestamp: datetime | None, now: datetime | None = None) -> int | None:
-    if provider_timestamp is None:
+def newest_observation_at(observed_at: datetime | None, provider_updated_at: datetime | None = None) -> datetime | None:
+    values = []
+    for value in (observed_at, provider_updated_at):
+        if value is not None:
+            values.append(value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc))
+    return max(values) if values else None
+
+
+def data_age_seconds(observed_at: datetime | None, provider_updated_at: datetime | None = None, now: datetime | None = None) -> int | None:
+    observation = newest_observation_at(observed_at, provider_updated_at)
+    if observation is None:
         return None
     current = now or datetime.now(timezone.utc)
-    value = provider_timestamp
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return max(0, int((current - value).total_seconds()))
+    return max(0, int((current - observation).total_seconds()))
 
 
-def classify_freshness(*, status: str, provider_timestamp: datetime | None, now: datetime | None = None) -> Freshness:
-    age = data_age_seconds(provider_timestamp, now)
+def classify_freshness(*, status: str, observed_at: datetime | None, provider_updated_at: datetime | None = None, now: datetime | None = None) -> Freshness:
+    age = data_age_seconds(observed_at, provider_updated_at, now)
     if age is None:
         return Freshness.UNKNOWN
-    if status in {"live", "halftime"} and age <= 90:
-        return Freshness.LIVE_CURRENT
+    if status in {"live", "halftime"}:
+        return Freshness.LIVE_CURRENT if age <= 90 else Freshness.STALE
     if age <= 900:
         return Freshness.RECENT
     return Freshness.STALE
-

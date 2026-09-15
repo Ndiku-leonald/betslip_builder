@@ -42,13 +42,29 @@ async def run_provider(label: str, provider: ApiSportsProvider, detail_kind: str
     if not candidates:
         report(f"{label} {detail_label}", "SKIPPED", "no fixture returned to inspect")
         return passed
-    item = candidates[0]
-    try:
-        await provider.detail(detail_kind, item.provider_fixture_id)
+    failures = []
+    checked = set()
+    for item in candidates:
+        if item.provider_fixture_id in checked:
+            continue
+        checked.add(item.provider_fixture_id)
+        if len(checked) > 3:
+            break
+        try:
+            payload = await provider.detail(detail_kind, item.provider_fixture_id)
+        except ProviderError as exc:
+            failures.append(str(exc))
+            continue
+        if not payload.get("response"):
+            continue
         report(f"{label} {detail_label}", "PASS", f"fixture {item.provider_fixture_id}")
-    except ProviderError as exc:
-        report(f"{label} {detail_label}", "FAILED", str(exc))
+        return passed
+
+    if failures:
+        report(f"{label} {detail_label}", "FAILED", failures[-1])
         passed = False
+    else:
+        report(f"{label} {detail_label}", "SKIPPED", "not covered for returned games")
     return passed
 
 

@@ -10,7 +10,7 @@ from app.db import Base, get_db
 import app.main as main_module
 from app.main import _app_today, app
 from app.models import Fixture, ProviderHealth, ProviderUsage
-from app.providers.api_sports import normalize_football
+from app.providers.api_sports import ProviderError, normalize_basketball, normalize_football
 from app.services.ingestion import ingest_fixtures
 
 
@@ -186,5 +186,63 @@ async def test_statistics_detail_uses_stats_capability_and_statistics_payload(mo
         assert result.available is True
         assert result.availability == "available"
         assert result.data == [{"team": "Home"}]
+    finally:
+        provider.configured = original_configured
+
+
+@pytest.mark.asyncio
+async def test_basketball_stats_returns_team_objects_and_structured_failure_states(monkeypatch) -> None:
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    basketball_payload = {
+        "game": {"id": 401, "date": "2026-09-15T16:00:00+00:00", "status": {"short": "FT"}},
+        "league": {"id": 1, "name": "Test Basketball"},
+        "teams": {"home": {"id": 1, "name": "Home"}, "away": {"id": 2, "name": "Away"}},
+        "scores": {"home": 90, "away": 88},
+    }
+    with Session(engine) as db:
+        ingest_fixtures(db, [normalize_basketball(basketball_payload)])
+        fixture_id = db.scalar(select(Fixture.id))
+
+    provider = main_module.providers["basketball"]
+    original_configured = provider.configured
+    provider.configured = True
+    team_stats = [{"game": {"id": 401}, "team": {"id": 1}, "field_goals": {"total": 22}}]
+
+    def no_record(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "_record_usage", no_record)
+    try:
+        async def team_detail(kind: str, provider_fixture_id: str) -> dict:
+            assert kind == "stats"
+            assert provider_fixture_id == "401"
+            return {"response": team_stats}
+
+        monkeypatch.setattr(provider, "detail", team_detail)
+        with Session(engine) as db:
+            result = await main_module._detail(fixture_id, "stats", db)
+        assert result.available is True
+        assert result.data == team_stats
+
+        async def empty_detail(*args, **kwargs) -> dict:
+            return {"response": []}
+
+        monkeypatch.setattr(provider, "detail", empty_detail)
+        with Session(engine) as db:
+            result = await main_module._detail(fixture_id, "stats", db)
+        assert result.availability == "not_covered"
+
+        async def failed_detail(*args, **kwargs) -> dict:
+            raise ProviderError("api-basketball", "upstream failed", 503)
+
+        monkeypatch.setattr(provider, "detail", failed_detail)
+        with Session(engine) as db:
+            result = await main_module._detail(fixture_id, "stats", db)
+        assert result.availability == "provider_failure"
+
+        with Session(engine) as db:
+            result = await main_module._detail(fixture_id, "events", db)
+        assert result.availability == "unsupported"
     finally:
         provider.configured = original_configured

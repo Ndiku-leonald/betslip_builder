@@ -108,7 +108,7 @@ class ApiSportsProvider:
     def __init__(self, *, name: str, key: str | None, base_url: str, cache: CacheBackend, quota: QuotaManager) -> None:
         self.name, self.key, self.base_url, self.cache, self.quota = name, key, base_url.rstrip("/"), cache, quota
         self.configured = bool(key)
-        self.capabilities = {"stats": True, "events": name == "api-football", "lineups": name == "api-football"}
+        self.capabilities = {"stats": True, "player_stats": True, "events": name == "api-football", "lineups": name == "api-football"}
         self.last_success_at: datetime | None = None
         self.last_error: str | None = None
         self.last_latency_ms: float | None = None
@@ -130,8 +130,13 @@ class ApiSportsProvider:
         self.last_error = None
         self.last_quota_blocked = False
 
-    def _request_event(self, endpoint: str, *, status_code: int | None, latency_ms: float | None, rate_limit_remaining: int | None, error: str | None = None, external_request: bool = True, requested_at: datetime | None = None) -> None:
-        self.last_request_events.append({"endpoint": endpoint, "requested_at": requested_at or datetime.now(timezone.utc), "status_code": status_code, "latency_ms": latency_ms, "rate_limit_remaining": rate_limit_remaining, "error": error, "cache_hit": False, "external_request": external_request})
+    def _request_event(self, endpoint: str, *, status_code: int | None, latency_ms: float | None, rate_limit_remaining: int | None, error: str | None = None, external_request: bool = True, requested_at: datetime | None = None, usage_id: str | None = None) -> None:
+        self.last_request_events.append({"endpoint": endpoint, "requested_at": requested_at or datetime.now(timezone.utc), "usage_id": usage_id, "status_code": status_code, "latency_ms": latency_ms, "rate_limit_remaining": rate_limit_remaining, "error": error, "cache_hit": False, "external_request": external_request})
+
+    def _complete_attempt(self, reservation, *, status_code: int | None, latency_ms: float | None, rate_limit_remaining: int | None, error: str | None = None) -> None:
+        self.quota.record(self.name, reservation)
+        self.quota.complete(self.name, reservation, status_code=status_code, latency_ms=latency_ms, rate_limit_remaining=rate_limit_remaining, error=error)
+        self.calls_today += 1
 
     async def _request(self, endpoint: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         self._reset_request_state()
@@ -141,7 +146,8 @@ class ApiSportsProvider:
             raise ProviderError(self.name, "Provider not configured")
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         for attempt in range(3):
-            if not self.quota.allow(self.name):
+            reservation = self.quota.reserve(self.name, endpoint)
+            if reservation is None:
                 self.last_error = "Configured quota limit reached"
                 self.last_status_code = 429
                 self.last_quota_blocked = True
@@ -149,52 +155,49 @@ class ApiSportsProvider:
                 raise ProviderError(self.name, self.last_error, 429)
             started = perf_counter()
             requested_at = datetime.now(timezone.utc)
-            request_recorded = False
-            event_recorded = False
+            attempt_status: int | None = None
+            attempt_remaining: int | None = None
             try:
                 async with httpx.AsyncClient(timeout=15) as client:
                     response = await client.get(url, params=params, headers={"x-apisports-key": self.key or ""})
-                request_recorded = True
                 self.last_latency_ms = round((perf_counter() - started) * 1000, 2)
                 self.last_status_code = response.status_code
+                attempt_status = response.status_code
                 remaining = response.headers.get("x-ratelimit-requests-remaining")
                 self.last_rate_limit_remaining = int(remaining) if remaining and remaining.isdigit() else None
-                self.quota.record(self.name)
-                self.calls_today += 1
+                attempt_remaining = self.last_rate_limit_remaining
                 if response.status_code == 429 or response.status_code >= 500:
                     self.last_error = f"Provider returned HTTP {response.status_code}"
-                    self._request_event(endpoint, requested_at=requested_at, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error)
-                    event_recorded = True
+                    self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
+                    self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error)
                     if attempt < 2:
                         await asyncio.sleep(0.5 * (2**attempt))
                         continue
                 if response.status_code >= 400:
                     self.last_error = f"Provider returned HTTP {response.status_code}"
-                    if not event_recorded:
-                        self._request_event(endpoint, requested_at=requested_at, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error)
+                    if response.status_code < 500 and response.status_code != 429:
+                        self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
+                        self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error)
                     raise ProviderError(self.name, f"Provider returned HTTP {response.status_code}", response.status_code)
                 payload = response.json()
                 errors = payload.get("errors") if isinstance(payload, dict) else None
                 if errors:
                     message = "; ".join(f"{key}: {value}" for key, value in errors.items()) if isinstance(errors, dict) else str(errors)
                     self.last_error = message
-                    self._request_event(endpoint, requested_at=requested_at, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=message)
-                    event_recorded = True
+                    self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=message)
+                    self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=message)
                     raise ProviderError(self.name, message, response.status_code)
                 self.last_observed_at = datetime.now(timezone.utc)
                 self.last_success_at = self.last_observed_at
                 self.last_error = None
-                self._request_event(endpoint, requested_at=requested_at, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining)
-                event_recorded = True
+                self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining)
+                self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining)
                 return payload
             except (httpx.HTTPError, ValueError) as exc:
                 self.last_error = str(exc)
-                if not request_recorded:
-                    self.quota.record(self.name)
-                    self.calls_today += 1
-                if not event_recorded:
-                    self.last_latency_ms = round((perf_counter() - started) * 1000, 2)
-                    self._request_event(endpoint, requested_at=requested_at, status_code=self.last_status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error)
+                self.last_latency_ms = round((perf_counter() - started) * 1000, 2)
+                self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
+                self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
                 if attempt < 2:
                     await asyncio.sleep(0.5 * (2**attempt))
                     continue
@@ -259,16 +262,19 @@ class ApiSportsProvider:
         return await self._request("games", {"id": provider_fixture_id})
 
     async def basketball_team_statistics(self, provider_fixture_id: str) -> dict[str, Any]:
-        return await self._request("games/statistics", {"id": provider_fixture_id})
+        return await self._request("games/statistics/teams", {"id": provider_fixture_id})
+
+    async def basketball_player_statistics(self, provider_fixture_id: str) -> dict[str, Any]:
+        return await self._request("games/statistics/players", {"id": provider_fixture_id})
 
     async def detail(self, kind: str, provider_fixture_id: str) -> dict[str, Any]:
         if not self.capabilities.get(kind, False):
             raise ProviderError(self.name, f"{kind} is not supported by {self.name}")
         if self.name == "api-football":
-            return await {"stats": self.football_statistics, "events": self.football_events, "lineups": self.football_lineups}[kind](provider_fixture_id)
+            return await {"stats": self.football_statistics, "player_stats": self.football_fixture_details, "events": self.football_events, "lineups": self.football_lineups}[kind](provider_fixture_id)
         if kind == "stats":
             return await self.basketball_team_statistics(provider_fixture_id)
-        return await self.basketball_game_details(provider_fixture_id)
+        return await self.basketball_player_statistics(provider_fixture_id)
 
     async def fixture_details(self, provider_fixture_id: str) -> dict[str, Any]:
         return await (self.football_fixture_details(provider_fixture_id) if self.name == "api-football" else self.basketball_game_details(provider_fixture_id))

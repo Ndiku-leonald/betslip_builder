@@ -10,7 +10,7 @@ Internal UUID-like string identifiers are the primary application identifiers. `
 
 ## Caching and quota
 
-`CacheBackend` uses Redis with JSON serialization when `REDIS_URL` is configured and reachable, and degrades to an in-memory TTL cache if Redis is unavailable. TTLs vary by resource and quota mode. `QuotaManager` enforces per-provider UTC-day limits; outbound retries consume quota, while cache hits do not. Provider usage persists each outbound attempt, including cache-hit status, latency, status, remaining quota, and errors.
+`CacheBackend` uses Redis with JSON serialization when `REDIS_URL` is configured and reachable, and degrades to an in-memory TTL cache if Redis is unavailable. TTLs vary by resource and quota mode. `QuotaManager` enforces per-provider UTC-day limits using an injected `PersistentQuotaStore`: each real attempt reserves a `ProviderUsage` row before network I/O, so restarts cannot reset consumption. Outbound retries consume quota, while cache hits do not. A process-local lock prevents same-process races; future multi-process PostgreSQL deployments should replace the repository reservation with an atomic database lock/reservation. Provider usage persists each attempt, including cache-hit status, latency, status, remaining quota, and errors.
 
 ## Background ingestion
 

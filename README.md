@@ -53,7 +53,7 @@ cd apps/web && npm install
 
 Set `API_FOOTBALL_KEY` and/or `API_BASKETBALL_KEY` in `.env` using keys from the API-Sports dashboard. Never commit `.env`.
 
-Optional quota overrides are `API_FOOTBALL_DAILY_LIMIT` and `API_BASKETBALL_DAILY_LIMIT`. Free mode defaults both providers to 100 outbound requests per UTC day; cache hits do not consume that allowance and retries do.
+Optional quota overrides are `API_FOOTBALL_DAILY_LIMIT` and `API_BASKETBALL_DAILY_LIMIT`. Free mode defaults both providers to 100 outbound requests per UTC day. Real requests reserve persistent `ProviderUsage` rows before network I/O, so the allowance survives restarts; cache hits do not consume it and retries do. A process-local lock prevents same-process races. Multi-process deployments should use a shared database with an atomic reservation implementation before scaling API workers.
 
 ## Run
 
@@ -81,7 +81,7 @@ Pop-Location
 
 The backend exposes OpenAPI at http://localhost:8000/docs. The frontend is at http://localhost:3000.
 
-Run the minimal real-provider smoke checks after configuring keys:
+Run the minimal real-provider smoke checks after configuring keys. The basketball check uses `games/statistics/teams` and reports `SKIPPED` when the returned competition has no team-stat coverage:
 
 ```powershell
 Push-Location apps/api

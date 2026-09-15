@@ -8,7 +8,7 @@ API-Football fixture details can include events, statistics, lineups, and player
 
 ## API-Basketball
 
-The adapter uses the official API-Sports basketball host `v1.basketball.api-sports.io`. Phase 1 calls countries, leagues, teams, date games, live games, game details, and the documented game-statistics endpoint. Basketball status, periods, and scores are normalized independently from football; football events and lineups are not fabricated for basketball.
+The adapter uses the official API-Sports basketball host `v1.basketball.api-sports.io`. Phase 1 calls countries, leagues, teams, date games, live games, game details, and the documented `games/statistics/teams` endpoint. Player statistics are exposed separately through `games/statistics/players`. Basketball status, periods, and scores are normalized independently from football; football events and lineups are not fabricated for basketball.
 
 ## Future sources
 

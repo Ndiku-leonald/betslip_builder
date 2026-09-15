@@ -16,13 +16,15 @@ from app.freshness import data_age_seconds
 from app.models import Competition, Fixture, ProviderHealth, ProviderUsage, Sport, Team
 from app.providers.api_sports import ApiSportsProvider, ProviderError
 from app.quota import QuotaManager
+from app.quota_store import PersistentQuotaStore
 from app.schemas import DetailOut, FixtureOut, ProviderStatus, ProviderUsageOut
 from app.services.ingestion import ingest_fixtures
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 settings = get_settings()
 cache = CacheBackend(settings.redis_url)
-quota = QuotaManager(settings.quota_mode, daily_limits=settings.provider_daily_limits)
+quota_store = PersistentQuotaStore(SessionLocal)
+quota = QuotaManager(settings.quota_mode, daily_limits=settings.provider_daily_limits, count_callback=quota_store.count_today, reserve_callback=quota_store.reserve, complete_callback=quota_store.complete)
 football = ApiSportsProvider(name="api-football", key=settings.api_football_key, base_url="https://v3.football.api-sports.io", cache=cache, quota=quota)
 basketball = ApiSportsProvider(name="api-basketball", key=settings.api_basketball_key, base_url="https://v1.basketball.api-sports.io", cache=cache, quota=quota)
 providers = {"football": football, "basketball": basketball}
@@ -59,7 +61,18 @@ def _record_usage(provider: ApiSportsProvider, endpoint: str, *, status_code: in
             recorded_at = event.get("requested_at") or datetime.now(timezone.utc)
             effective_status = event["status_code"]
             event_error = event["error"]
-            db.add(ProviderUsage(provider=provider.name, endpoint=event["endpoint"], requested_at=recorded_at, status_code=effective_status, latency_ms=event["latency_ms"], cache_hit=event["cache_hit"], external_request=event["external_request"], rate_limit_remaining=event["rate_limit_remaining"], error=event_error))
+            usage = db.get(ProviderUsage, event.get("usage_id")) if event.get("usage_id") else None
+            if usage is None:
+                usage = ProviderUsage(id=event["usage_id"], provider=provider.name, endpoint=event["endpoint"], requested_at=recorded_at, status_code=effective_status, latency_ms=event["latency_ms"], cache_hit=event["cache_hit"], external_request=event["external_request"], rate_limit_remaining=event["rate_limit_remaining"], error=event_error) if event.get("usage_id") else ProviderUsage(provider=provider.name, endpoint=event["endpoint"], requested_at=recorded_at, status_code=effective_status, latency_ms=event["latency_ms"], cache_hit=event["cache_hit"], external_request=event["external_request"], rate_limit_remaining=event["rate_limit_remaining"], error=event_error)
+                db.add(usage)
+            else:
+                usage.requested_at = recorded_at
+                usage.status_code = effective_status
+                usage.latency_ms = event["latency_ms"]
+                usage.cache_hit = event["cache_hit"]
+                usage.external_request = event["external_request"]
+                usage.rate_limit_remaining = event["rate_limit_remaining"]
+                usage.error = event_error
             health.configured = provider.configured
             if not event["cache_hit"]:
                 health.last_latency_ms = event["latency_ms"]
@@ -224,7 +237,8 @@ async def _detail(fixture_id: str, kind: str, db: Session, response_key: str | N
     item = db.get(Fixture, fixture_id)
     if not item:
         raise HTTPException(404, "Fixture not found")
-    provider = providers.get(db.scalar(select(Sport.slug).where(Sport.id == item.sport_id)))
+    sport_slug = db.scalar(select(Sport.slug).where(Sport.id == item.sport_id))
+    provider = providers.get(sport_slug)
     if not provider:
         return DetailOut(fixture_id=fixture_id, provider=item.provider, available=False, availability="unsupported", message="Not available from current provider")
     if not provider.capabilities.get(kind, False):
@@ -237,7 +251,10 @@ async def _detail(fixture_id: str, kind: str, db: Session, response_key: str | N
         response = payload.get("response", [])
         if not response:
             return DetailOut(fixture_id=fixture_id, provider=item.provider, available=False, availability="not_covered", data=None, stale=False, message="Not available from current provider")
-        data = response[0].get(response_key or kind) if response and isinstance(response[0], dict) else response
+        if sport_slug == "basketball":
+            data = response
+        else:
+            data = response[0].get(response_key or kind) if isinstance(response[0], dict) else response
         if data is None:
             return DetailOut(fixture_id=fixture_id, provider=item.provider, available=False, availability="not_covered", data=None, stale=False, message="Not available from current provider")
         return DetailOut(fixture_id=fixture_id, provider=item.provider, available=True, availability="available", data=data, stale=False, message=None)
@@ -259,6 +276,11 @@ async def fixture_events(fixture_id: str, db: Session = Depends(get_db)) -> Deta
 @app.get("/api/fixtures/{fixture_id}/lineups", response_model=DetailOut)
 async def fixture_lineups(fixture_id: str, db: Session = Depends(get_db)) -> DetailOut:
     return await _detail(fixture_id, "lineups", db)
+
+
+@app.get("/api/fixtures/{fixture_id}/player-stats", response_model=DetailOut)
+async def fixture_player_stats(fixture_id: str, db: Session = Depends(get_db)) -> DetailOut:
+    return await _detail(fixture_id, "player_stats", db, response_key="players")
 
 
 @app.get("/api/providers/status", response_model=list[ProviderStatus])

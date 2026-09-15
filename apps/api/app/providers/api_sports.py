@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 
@@ -110,12 +110,23 @@ class ApiSportsProvider:
         self.last_success_at: datetime | None = None
         self.last_error: str | None = None
         self.last_latency_ms: float | None = None
+        self.last_status_code: int | None = None
+        self.last_cache_hit = False
+        self.last_rate_limit_remaining: int | None = None
         self.calls_today = 0
 
     async def _request(self, endpoint: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+        self.last_cache_hit = False
+        self.last_status_code = None
+        self.last_latency_ms = None
+        self.last_rate_limit_remaining = None
         if not self.configured:
+            self.last_error = "Provider not configured"
+            self.last_status_code = None
             raise ProviderError(self.name, "Provider not configured")
         if not self.quota.allow(self.name):
+            self.last_error = "Configured quota limit reached"
+            self.last_status_code = 429
             raise ProviderError(self.name, "Configured quota limit reached")
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         for attempt in range(3):
@@ -124,17 +135,28 @@ class ApiSportsProvider:
                 async with httpx.AsyncClient(timeout=15) as client:
                     response = await client.get(url, params=params, headers={"x-apisports-key": self.key or ""})
                 self.last_latency_ms = round((perf_counter() - started) * 1000, 2)
+                self.last_status_code = response.status_code
+                remaining = response.headers.get("x-ratelimit-requests-remaining")
+                self.last_rate_limit_remaining = int(remaining) if remaining and remaining.isdigit() else None
                 self.quota.record(self.name)
                 self.calls_today += 1
                 if response.status_code == 429 or response.status_code >= 500:
+                    self.last_error = f"Provider returned HTTP {response.status_code}"
                     if attempt < 2:
                         await asyncio.sleep(0.5 * (2**attempt))
                         continue
                 if response.status_code >= 400:
+                    self.last_error = f"Provider returned HTTP {response.status_code}"
                     raise ProviderError(self.name, f"Provider returned HTTP {response.status_code}", response.status_code)
-                self.last_success_at = datetime.utcnow()
+                payload = response.json()
+                errors = payload.get("errors") if isinstance(payload, dict) else None
+                if errors:
+                    message = "; ".join(f"{key}: {value}" for key, value in errors.items()) if isinstance(errors, dict) else str(errors)
+                    self.last_error = message
+                    raise ProviderError(self.name, message, response.status_code)
+                self.last_success_at = datetime.now(timezone.utc)
                 self.last_error = None
-                return response.json()
+                return payload
             except (httpx.HTTPError, ValueError) as exc:
                 self.last_error = str(exc)
                 if attempt < 2:
@@ -149,6 +171,9 @@ class ApiSportsProvider:
         ttl = 15 if params.get("live") else (300 if self.quota.mode == "free" else 60)
         cached = self.cache.get(cache_key)
         if cached is not None:
+            self.last_cache_hit = True
+            self.last_status_code = 200
+            self.last_latency_ms = 0.0
             return cached
         payload = await self._request("fixtures" if self.name == "api-football" else "games", params)
         normalizer = normalize_football if self.name == "api-football" else normalize_basketball
@@ -165,4 +190,3 @@ class ApiSportsProvider:
     async def fixture_details(self, provider_fixture_id: str) -> dict[str, Any]:
         endpoint = "fixtures" if self.name == "api-football" else "games"
         return await self._request(endpoint, {"id": provider_fixture_id})
-

@@ -71,8 +71,10 @@ npm run dev
 Ingest today's real data explicitly:
 
 ```powershell
-python -m app.ingest --app-dir apps/api --sport football --date 2026-09-14
-python -m app.ingest --app-dir apps/api --sport basketball --date 2026-09-14
+Push-Location apps/api
+python -m app.ingest --sport football --date 2026-09-14
+python -m app.ingest --sport basketball --date 2026-09-14
+Pop-Location
 ```
 
 The backend exposes OpenAPI at http://localhost:8000/docs. The frontend is at http://localhost:3000.
@@ -109,4 +111,3 @@ Future reviewed phases may add market normalization, odds/value analysis, footba
 ## Responsible use
 
 SlipIQ provides statistical decision support. Sports outcomes are uncertain. No output should be described as guaranteed, certain, or risk-free, and SlipIQ does not place bets automatically.
-

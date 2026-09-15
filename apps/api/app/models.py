@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -11,6 +11,10 @@ from app.db import Base
 
 def new_id() -> str:
     return str(uuid4())
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class Freshness(StrEnum):
@@ -31,8 +35,8 @@ class FixtureStatus(StrEnum):
 
 
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class Sport(TimestampMixin, Base):
@@ -109,7 +113,7 @@ class Fixture(TimestampMixin, Base):
     period: Mapped[str | None] = mapped_column(String(40))
     clock: Mapped[str | None] = mapped_column(String(40))
     provider_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     freshness: Mapped[str] = mapped_column(String(30), default=Freshness.UNKNOWN.value)
 
 
@@ -138,7 +142,7 @@ class MatchStatSnapshot(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     fixture_id: Mapped[str] = mapped_column(ForeignKey("fixtures.id"), index=True)
     provider_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     freshness: Mapped[str] = mapped_column(String(30), default=Freshness.UNKNOWN.value)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -203,7 +207,7 @@ class ProviderUsage(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     provider: Mapped[str] = mapped_column(String(60), index=True)
     endpoint: Mapped[str] = mapped_column(String(200))
-    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     cache_hit: Mapped[bool] = mapped_column(Boolean, default=False)

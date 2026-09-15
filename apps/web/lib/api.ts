@@ -5,6 +5,7 @@ export type Fixture = {
   provider: string; provider_timestamp: string | null; ingested_at: string; freshness: string; data_age_seconds: number | null;
 };
 export type ProviderStatus = { provider: string; configured: boolean; healthy: boolean; last_success_at: string | null; last_error: string | null; latency_ms: number | null; calls_today: number };
+export type FixtureDetail = { fixture_id: string; provider: string; available: boolean; data: unknown; stale: boolean; message: string | null };
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 async function request<T>(path: string): Promise<T> {
@@ -12,5 +13,9 @@ async function request<T>(path: string): Promise<T> {
   if (!response.ok) throw new Error(`API request failed (${response.status})`);
   return response.json() as Promise<T>;
 }
-export const api = { fixtures: (path = "/api/fixtures/today") => request<Fixture[]>(path), providers: () => request<ProviderStatus[]>("/api/providers/status") };
-
+export const api = {
+  fixtures: (path = "/api/fixtures/today") => request<Fixture[]>(path),
+  fixture: (id: string) => request<Fixture>(`/api/fixtures/${encodeURIComponent(id)}`),
+  detail: (id: string, kind: "stats" | "events" | "lineups") => request<FixtureDetail>(`/api/fixtures/${encodeURIComponent(id)}/${kind}`),
+  providers: () => request<ProviderStatus[]>("/api/providers/status"),
+};

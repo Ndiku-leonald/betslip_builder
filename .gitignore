@@ -25,3 +25,6 @@ test-results/
 .DS_Store
 .idea/
 .vscode/
+artifacts/datasets/
+artifacts/models/
+artifacts/checkpoints/

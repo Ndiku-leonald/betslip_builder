@@ -13,11 +13,12 @@ from app.cache import CacheBackend
 from app.config import get_settings
 from app.db import SessionLocal, get_db
 from app.freshness import data_age_seconds
-from app.models import Competition, Fixture, ProviderHealth, ProviderUsage, Sport, Team
+from app.models import BacktestRun, Competition, Fixture, ModelVersion, Prediction, ProviderHealth, ProviderUsage, Sport, Team
 from app.providers.api_sports import ApiSportsProvider, ProviderError
 from app.quota import QuotaManager
 from app.quota_store import PersistentQuotaStore
-from app.schemas import DetailOut, FixtureOut, ProviderStatus, ProviderUsageOut
+from app.schemas import DetailOut, FixtureOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut
+from app.prediction.service import PredictionService, PredictionUnavailable
 from app.services.ingestion import ingest_fixtures
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -30,6 +31,7 @@ basketball = ApiSportsProvider(name="api-basketball", key=settings.api_basketbal
 providers = {"football": football, "basketball": basketball}
 scheduler: AsyncIOScheduler | None = None
 app_timezone = ZoneInfo(settings.app_timezone)
+prediction_service = PredictionService()
 
 
 def _app_today() -> date:
@@ -281,6 +283,47 @@ async def fixture_lineups(fixture_id: str, db: Session = Depends(get_db)) -> Det
 @app.get("/api/fixtures/{fixture_id}/player-stats", response_model=DetailOut)
 async def fixture_player_stats(fixture_id: str, db: Session = Depends(get_db)) -> DetailOut:
     return await _detail(fixture_id, "player_stats", db, response_key="players")
+
+
+def _prediction_response(db: Session, fixture_id: str, model_version_id: str | None = None) -> dict:
+    try:
+        return prediction_service.generate(db, fixture_id, model_version_id)
+    except PredictionUnavailable as exc:
+        return {"available": False, "fixture_id": fixture_id, "reason": str(exc), "markets": {}, "data_quality": {}, "warnings": []}
+
+
+@app.get("/api/fixtures/{fixture_id}/prediction", response_model=PredictionOut)
+def fixture_prediction(fixture_id: str, model_version_id: str | None = Query(default=None), db: Session = Depends(get_db)) -> dict:
+    return _prediction_response(db, fixture_id, model_version_id)
+
+
+@app.post("/api/predictions/generate/{fixture_id}", response_model=PredictionOut)
+def generate_prediction(fixture_id: str, model_version_id: str | None = Query(default=None), db: Session = Depends(get_db)) -> dict:
+    return _prediction_response(db, fixture_id, model_version_id)
+
+
+@app.get("/api/predictions/{prediction_id}", response_model=PredictionOut)
+def stored_prediction(prediction_id: str, db: Session = Depends(get_db)) -> dict:
+    item = db.get(Prediction, prediction_id)
+    if item is None: raise HTTPException(404, "Prediction not found")
+    return item.payload
+
+
+@app.get("/api/models", response_model=list[ModelVersionOut])
+def models(sport: str | None = Query(default=None), db: Session = Depends(get_db)) -> list[ModelVersion]:
+    return prediction_service.list_models(db, sport)
+
+
+@app.get("/api/models/{model_id}", response_model=ModelVersionOut)
+def model(model_id: str, db: Session = Depends(get_db)) -> ModelVersion:
+    item = db.get(ModelVersion, model_id)
+    if item is None: raise HTTPException(404, "Model not found")
+    return item
+
+
+@app.get("/api/backtests")
+def backtests(db: Session = Depends(get_db)) -> list[dict]:
+    return [{"id": item.id, "sport": item.sport, "model_version_id": item.model_version_id, "sample_count": item.sample_count, "metrics": item.metrics, "start_at": item.start_at, "end_at": item.end_at} for item in db.scalars(select(BacktestRun).order_by(BacktestRun.created_at.desc()))]
 
 
 @app.get("/api/providers/status", response_model=list[ProviderStatus])

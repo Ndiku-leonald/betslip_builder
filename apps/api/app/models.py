@@ -245,6 +245,19 @@ class ModelVersion(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(120))
     version: Mapped[str] = mapped_column(String(80))
+    sport: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
+    algorithm: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    trained_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    training_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    training_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    validation_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    validation_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    feature_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    parameters: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    metrics: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    artifact_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sample_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="candidate", index=True)
 
 
 class Prediction(TimestampMixin, Base):
@@ -252,7 +265,100 @@ class Prediction(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     fixture_id: Mapped[str] = mapped_column(ForeignKey("fixtures.id"), index=True)
     model_version_id: Mapped[str | None] = mapped_column(ForeignKey("model_versions.id"), nullable=True)
+    sport: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    prediction_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    data_cutoff_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    features_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class TeamMatchStatistic(TimestampMixin, Base):
+    __tablename__ = "team_match_statistics"
+    __table_args__ = (UniqueConstraint("fixture_id", "team_id", name="uq_team_match_stat"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    fixture_id: Mapped[str] = mapped_column(ForeignKey("fixtures.id"), index=True)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"), index=True)
+    is_home: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    goals: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    shots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    shots_on_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    possession: Mapped[float | None] = mapped_column(Float, nullable=True)
+    corners: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fouls: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    yellow_cards: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    red_cards: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expected_goals: Mapped[float | None] = mapped_column(Float, nullable=True)
+    points: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    field_goals_made: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    field_goals_attempted: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    three_pointers_made: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    three_pointers_attempted: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    free_throws_made: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    free_throws_attempted: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    offensive_rebounds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    defensive_rebounds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_rebounds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    assists: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    steals: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    blocks: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    turnovers: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    personal_fouls: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class FixtureFeatureSnapshot(TimestampMixin, Base):
+    __tablename__ = "fixture_features"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    fixture_id: Mapped[str] = mapped_column(ForeignKey("fixtures.id"), index=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    feature_version: Mapped[str] = mapped_column(String(80))
+    data_cutoff_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    values: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    data_quality: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class TrainingRun(TimestampMixin, Base):
+    __tablename__ = "training_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    model_version_id: Mapped[str | None] = mapped_column(ForeignKey("model_versions.id"), nullable=True, index=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    feature_version: Mapped[str] = mapped_column(String(80))
+    training_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    training_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    validation_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    validation_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    rows_excluded: Mapped[int] = mapped_column(Integer, default=0)
+    seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class BacktestRun(TimestampMixin, Base):
+    __tablename__ = "backtest_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    model_version_id: Mapped[str | None] = mapped_column(ForeignKey("model_versions.id"), nullable=True, index=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class BacktestPrediction(TimestampMixin, Base):
+    __tablename__ = "backtest_predictions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    backtest_run_id: Mapped[str] = mapped_column(ForeignKey("backtest_runs.id"), index=True)
+    fixture_id: Mapped[str] = mapped_column(ForeignKey("fixtures.id"), index=True)
+    model_version_id: Mapped[str | None] = mapped_column(ForeignKey("model_versions.id"), nullable=True, index=True)
+    prediction_type: Mapped[str] = mapped_column(String(80))
+    raw_probability: Mapped[float] = mapped_column(Float)
+    calibrated_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actual_outcome: Mapped[float] = mapped_column(Float)
+    data_cutoff_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class Slip(TimestampMixin, Base):

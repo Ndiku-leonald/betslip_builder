@@ -58,3 +58,37 @@ class DetailOut(BaseModel):
     data: Any = None
     stale: bool = False
     message: str | None = None
+
+
+class PredictionOut(BaseModel):
+    available: bool
+    fixture_id: str
+    sport: str | None = None
+    generated_at: datetime | None = None
+    data_cutoff_at: datetime | str | None = None
+    model_version: str | None = None
+    model: str | None = None
+    expected_home_goals: float | None = None
+    expected_away_goals: float | None = None
+    expected_home_score: float | None = None
+    expected_away_score: float | None = None
+    expected_margin: float | None = None
+    expected_total: float | None = None
+    markets: dict = {}
+    data_quality: dict = {}
+    model_confidence_score: float | None = None
+    warnings: list[str] = []
+    reason: str | None = None
+
+
+class ModelVersionOut(BaseModel):
+    id: str
+    name: str
+    version: str
+    sport: str | None = None
+    algorithm: str | None = None
+    trained_at: datetime | None = None
+    feature_version: str | None = None
+    metrics: dict = {}
+    sample_count: int | None = None
+    status: str

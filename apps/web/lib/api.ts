@@ -6,6 +6,8 @@ export type Fixture = {
 };
 export type ProviderStatus = { provider: string; configured: boolean; healthy: boolean; last_success_at: string | null; last_error: string | null; latency_ms: number | null; calls_today: number; capabilities: Record<string, boolean> };
 export type FixtureDetail = { fixture_id: string; provider: string; available: boolean; availability: "available" | "unsupported" | "not_covered" | "temporarily_unavailable" | "provider_failure"; data: unknown; stale: boolean; message: string | null };
+export type Prediction = { available: boolean; fixture_id: string; sport?: string; generated_at?: string; data_cutoff_at?: string; model_version?: string; model?: string; expected_home_goals?: number; expected_away_goals?: number; expected_home_score?: number; expected_away_score?: number; expected_margin?: number; expected_total?: number; markets: Record<string, number | { win: number; push: number; lose: number }>; data_quality: Record<string, number>; model_confidence_score?: number; warnings: string[]; reason?: string };
+export type ModelVersion = { id: string; name: string; version: string; sport?: string; algorithm?: string; trained_at?: string; feature_version?: string; metrics: Record<string, number>; sample_count?: number; status: string };
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 async function request<T>(path: string): Promise<T> {
@@ -16,6 +18,9 @@ async function request<T>(path: string): Promise<T> {
 export const api = {
   fixtures: (path = "/api/fixtures/today") => request<Fixture[]>(path),
   fixture: (id: string) => request<Fixture>(`/api/fixtures/${encodeURIComponent(id)}`),
-  detail: (id: string, kind: "stats" | "events" | "lineups") => request<FixtureDetail>(`/api/fixtures/${encodeURIComponent(id)}/${kind}`),
+  detail: (id: string, kind: "stats" | "events" | "lineups" | "player-stats") => request<FixtureDetail>(`/api/fixtures/${encodeURIComponent(id)}/${kind}`),
+  prediction: (id: string) => request<Prediction>(`/api/fixtures/${encodeURIComponent(id)}/prediction`),
   providers: () => request<ProviderStatus[]>("/api/providers/status"),
+  models: () => request<ModelVersion[]>("/api/models"),
+  backtests: () => request<Record<string, unknown>[]>("/api/backtests"),
 };

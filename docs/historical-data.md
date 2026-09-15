@@ -1,0 +1,18 @@
+# Historical data workflow
+
+Backfills use the existing API-Sports provider, cache and quota accounting. They are resumable and idempotent: completed fixtures are upserted by provider identity, team-match statistics by fixture/team, and a checkpoint is written under `artifacts/checkpoints/` (generated files are ignored by Git).
+
+Examples from `apps/api`:
+
+```text
+python -m app.historical.ingest_football --league 39 --season 2025 --start-date 2025-01-01 --end-date 2025-01-31 --max-requests 20
+python -m app.historical.ingest_basketball --league 12 --season 2025 --start-date 2025-01-01 --end-date 2025-01-31 --no-stats
+python -m app.historical.audit --sport football
+python -m app.training.build_dataset --sport football --output artifacts/datasets/football.csv
+```
+
+Use `--dry-run`, narrow date ranges and `--max-requests` before a real backfill. A retry is a real provider request and is charged to quota; cache hits are not. API-Sports daily quota boundaries are UTC. Do not run a large backfill in CI or during local development without an explicit budget.
+
+Football team statistics are normalized only when supplied by the provider. Basketball team statistics use the documented `games/statistics/teams` endpoint; player statistics are a separate capability using `games/statistics/players`. Unsupported or uncovered data is represented as unavailable, never fabricated.
+
+CSV export is always available. Parquet export is supported when pandas and a parquet engine are installed. Audit output covers duplicate provider identities, invalid scores, competition counts, season/date coverage and snapshot counts. Generated datasets, checkpoints, model artifacts and runtime SQLite files are not source-controlled.

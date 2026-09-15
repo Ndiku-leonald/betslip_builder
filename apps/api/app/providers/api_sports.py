@@ -240,8 +240,11 @@ class ApiSportsProvider:
                 value[key] = _parse_dt(value[key])
         return NormalizedFixture(**value)
 
-    async def fixtures_by_date(self, date: str) -> list[NormalizedFixture]:
-        return await self._fixtures({"date": date})
+    async def fixtures_by_date(self, date: str, league: str | None = None, season: str | None = None) -> list[NormalizedFixture]:
+        params = {"date": date}
+        if league: params["league"] = str(league)
+        if season: params["season"] = str(season)
+        return await self._fixtures(params)
 
     async def live_fixtures(self) -> list[NormalizedFixture]:
         return await self._fixtures({"live": "all"})

@@ -1,14 +1,16 @@
 # SlipIQ
 
-SlipIQ is a production-oriented sports data foundation for football and basketball analytics. Phase 1 proves the path from real provider data to normalized storage, API endpoints, and a frontend viewer. It deliberately does not make predictions, place bets, or present fabricated selections.
+SlipIQ is a production-oriented sports data and statistical modeling foundation for football and basketball analytics. Stage Two adds historical, leakage-safe probability models and model review surfaces. It does not optimize slips, compare odds, place bets, or present fabricated selections.
 
-## Phase 1 status
+## Stage One and Two status
 
 - FastAPI backend with SQLAlchemy/Alembic and SQLite or PostgreSQL.
 - API-Sports adapters for API-Football and API-Basketball.
 - Canonical internal IDs, provider mappings, idempotent fixture upserts, freshness, cache, quota, and provider-health services.
 - Next.js/React/Tailwind/TanStack Query frontend for dashboard, live fixtures, fixture details, and data sources.
 - Unit/API tests, migration setup, CI, and architecture documentation.
+- Historical backfill commands, normalized team-match statistics, chronological feature snapshots, football Poisson/Dixon-Coles and basketball expected-score baselines.
+- Candidate model versioning, validation-only calibration, walk-forward evaluation, prediction API and a clearly labeled model-estimate tab on fixture pages.
 
 ## Architecture
 
@@ -116,11 +118,20 @@ CI runs backend tests and frontend lint/typecheck/test/build without requiring p
 
 ## Git workflow
 
-Development happens on `develop`; `main` is not modified by Phase 1. Commit meaningful milestones and push them to `origin/develop` for review.
+Development happens on `develop`; `main` is not modified by Stage One or Stage Two. Commit meaningful milestones and push them to `origin/develop` for review.
+
+## Stage Two research workflow
+
+1. Configure one provider key and a deliberately small date range.
+2. Run a quota-bounded historical backfill and inspect `python -m app.historical.audit --sport football`.
+3. Build/export the dataset, train a `candidate`, review walk-forward metrics, and activate a champion manually only after review.
+4. Generate an upcoming-fixture prediction only when enough pre-match history exists.
+
+See [docs/historical-data.md](docs/historical-data.md) and [docs/modeling.md](docs/modeling.md). Synthetic tests and the local pipeline are labeled test data; they are not evidence of real-world accuracy.
 
 ## Roadmap
 
-Future reviewed phases may add market normalization, odds/value analysis, football and basketball models, live probability updates, correlation-aware slip construction, and approved bookmaker feeds. They must preserve the canonical data layer and responsible-use boundaries.
+Future reviewed phases may add market normalization, odds/value analysis, live probability updates, correlation-aware slip construction, and approved bookmaker feeds. They must preserve the canonical data layer and responsible-use boundaries.
 
 ## Responsible use
 

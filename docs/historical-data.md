@@ -11,7 +11,7 @@ python -m app.historical.audit --sport football
 python -m app.training.build_dataset --sport football --output artifacts/datasets/football.csv
 ```
 
-Use `--dry-run`, narrow date ranges and `--max-requests` before a real backfill. A retry is a real provider request and is charged to quota; cache hits are not. API-Sports daily quota boundaries are UTC. Do not run a large backfill in CI or during local development without an explicit budget.
+Use `--dry-run`, narrow date ranges and `--max-requests` before a real backfill. The command summary separates logical operations, actual external requests, and cache hits. A retry is a real provider request and is charged to quota; cache hits are not. The provider request budget is applied before each retry, so `--max-requests` caps outbound attempts. API-Sports daily quota boundaries are UTC. Do not run a large backfill in CI or during local development without an explicit budget.
 
 Football team statistics are normalized only when supplied by the provider. Basketball team statistics use the documented `games/statistics/teams` endpoint; player statistics are a separate capability using `games/statistics/players`. Unsupported or uncovered data is represented as unavailable, never fabricated.
 

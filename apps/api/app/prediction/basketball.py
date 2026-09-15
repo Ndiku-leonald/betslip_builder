@@ -13,6 +13,7 @@ class BasketballExpectedScoreModel:
     def __init__(self) -> None:
         self.name = "basketball_expected_score_v1"
         self.home_mean, self.away_mean, self.margin_sd, self.total_sd = 105.0, 102.0, 12.0, 18.0
+        self.home_score_sd, self.away_score_sd = 10.0, 10.0
 
     def fit(self, rows: list[FeatureRow]) -> "BasketballExpectedScoreModel":
         actual = [x.actual for x in rows if x.actual]
@@ -22,6 +23,8 @@ class BasketballExpectedScoreModel:
             margins = [x["margin"] for x in actual]; totals = [x["total"] for x in actual]
             self.margin_sd = max(4.0, (sum((x - mean(margins)) ** 2 for x in margins) / max(1, len(margins))) ** .5)
             self.total_sd = max(6.0, (sum((x - mean(totals)) ** 2 for x in totals) / max(1, len(totals))) ** .5)
+            self.home_score_sd = max(4.0, (sum((x["home_points"] - self.home_mean) ** 2 for x in actual) / max(1, len(actual))) ** .5)
+            self.away_score_sd = max(4.0, (sum((x["away_points"] - self.away_mean) ** 2 for x in actual) / max(1, len(actual))) ** .5)
         return self
 
     def _scores(self, row: FeatureRow) -> tuple[float, float]:
@@ -40,8 +43,8 @@ class BasketballExpectedScoreModel:
         for line in (200.5, 210.5, 220.5, 230.5, 240.5):
             markets[f"over_{line:g}"] = float(norm.cdf((total - line) / self.total_sd)); markets[f"under_{line:g}"] = 1 - markets[f"over_{line:g}"]
         for line in (95.5, 100.5, 105.5, 110.5):
-            markets[f"home_over_{line:g}"] = float(norm.cdf((home - line) / (self.total_sd / 2))); markets[f"away_over_{line:g}"] = float(norm.cdf((away - line) / (self.total_sd / 2)))
+            markets[f"home_over_{line:g}"] = float(norm.cdf((home - line) / self.home_score_sd)); markets[f"away_over_{line:g}"] = float(norm.cdf((away - line) / self.away_score_sd))
         return {"model": self.name, "expected_home_score": home, "expected_away_score": away, "expected_margin": margin, "expected_total": total, "variance": {"margin_sd": self.margin_sd, "total_sd": self.total_sd}, "markets": markets}
 
     def metadata(self) -> dict:
-        return {"name": self.name, "sport": self.sport, "algorithm": "normal_expected_score", "home_mean": self.home_mean, "away_mean": self.away_mean, "margin_sd": self.margin_sd, "total_sd": self.total_sd}
+        return {"name": self.name, "sport": self.sport, "algorithm": "normal_expected_score", "home_mean": self.home_mean, "away_mean": self.away_mean, "margin_sd": self.margin_sd, "total_sd": self.total_sd, "home_score_sd": self.home_score_sd, "away_score_sd": self.away_score_sd}

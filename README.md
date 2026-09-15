@@ -124,7 +124,7 @@ Development happens on `develop`; `main` is not modified by Stage One or Stage T
 
 1. Configure one provider key and a deliberately small date range.
 2. Run a quota-bounded historical backfill and inspect `python -m app.historical.audit --sport football`.
-3. Build/export the dataset, train a `candidate`, review walk-forward metrics, and activate a champion manually only after review.
+3. Build/export the dataset, train a `candidate`, review family-level walk-forward metrics and baseline comparisons, and activate a champion manually only after review (`python -m app.training.activate MODEL_VERSION_ID`).
 4. Generate an upcoming-fixture prediction only when enough pre-match history exists.
 
 See [docs/historical-data.md](docs/historical-data.md) and [docs/modeling.md](docs/modeling.md). Synthetic tests and the local pipeline are labeled test data; they are not evidence of real-world accuracy.

@@ -33,5 +33,27 @@ class MarketCalibrator:
     def __init__(self, minimum_samples: int = 20) -> None: self.minimum_samples, self.calibrators = minimum_samples, {}
     def fit(self, predictions: dict[str, list[float]], outcomes: dict[str, list[float]]) -> "MarketCalibrator":
         self.calibrators = {key: SigmoidCalibrator(self.minimum_samples).fit(predictions[key], outcomes[key]) for key in predictions if key in outcomes}; return self
-    def transform(self, markets: dict[str, float]) -> dict[str, float]: return {key: self.calibrators[key].transform(value) if key in self.calibrators else float(max(0, min(1, value))) for key, value in markets.items()}
+    @classmethod
+    def from_metadata(cls, metadata: dict | None) -> "MarketCalibrator":
+        result = cls()
+        for key, values in (metadata or {}).items():
+            item = SigmoidCalibrator(values.get("minimum_samples", 20)); item.a = float(values.get("a", 1)); item.b = float(values.get("b", 0)); item.fitted = bool(values.get("fitted", False)); result.calibrators[key] = item
+        return result
+
+    def _one(self, key: str, value: float) -> float: return self.calibrators[key].transform(value) if key in self.calibrators else float(max(0, min(1, value)))
+
+    def transform(self, markets: dict[str, float]) -> dict[str, float]:
+        result = {key: self._one(key, value) if isinstance(value, (int, float)) else value for key, value in markets.items()}
+        for group in (("home_win", "draw", "away_win"), ("home_moneyline", "away_moneyline")):
+            present = [key for key in group if key in result]
+            if len(present) == len(group):
+                total = sum(result[key] for key in present) or 1; result.update({key: result[key] / total for key in present})
+        for first, second in (("btts_yes", "btts_no"),):
+            if first in result and second in result: result[second] = 1 - result[first]
+        for key in list(result):
+            if key.startswith("over_"):
+                line = key.removeprefix("over_"); under = f"under_{line}"
+                if under in result: result[under] = 1 - result[key]
+        return result
+
     def metadata(self) -> dict: return {key: value.metadata() for key, value in self.calibrators.items()}

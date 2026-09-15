@@ -118,6 +118,7 @@ class ApiSportsProvider:
         self.last_observed_at: datetime | None = None
         self.last_request_events: list[dict[str, Any]] = []
         self.last_quota_blocked = False
+        self.request_budget: int | None = None
         self.calls_today = 0
 
     def _reset_request_state(self) -> None:
@@ -146,6 +147,12 @@ class ApiSportsProvider:
             raise ProviderError(self.name, "Provider not configured")
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         for attempt in range(3):
+            if self.request_budget is not None and self.request_budget <= 0:
+                self.last_error = "Historical request budget reached"
+                self.last_status_code = 429
+                self.last_quota_blocked = True
+                self._request_event(endpoint, status_code=429, latency_ms=0.0, rate_limit_remaining=None, error=self.last_error, external_request=False)
+                raise ProviderError(self.name, self.last_error, 429)
             reservation = self.quota.reserve(self.name, endpoint)
             if reservation is None:
                 self.last_error = "Configured quota limit reached"
@@ -155,6 +162,7 @@ class ApiSportsProvider:
                 raise ProviderError(self.name, self.last_error, 429)
             started = perf_counter()
             requested_at = datetime.now(timezone.utc)
+            if self.request_budget is not None: self.request_budget -= 1
             attempt_status: int | None = None
             attempt_remaining: int | None = None
             try:

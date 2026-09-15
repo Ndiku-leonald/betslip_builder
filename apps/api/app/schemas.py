@@ -75,7 +75,11 @@ class PredictionOut(BaseModel):
     expected_margin: float | None = None
     expected_total: float | None = None
     markets: dict = {}
+    raw_probability: dict = {}
+    calibrated_probability: dict = {}
+    calibration_status: str | None = None
     data_quality: dict = {}
+    confidence_components: dict = {}
     model_confidence_score: float | None = None
     warnings: list[str] = []
     reason: str | None = None

@@ -89,19 +89,24 @@ async def ingest_range(db: Session, provider: ApiSportsProvider, start: date, en
     if resume and path.exists():
         try: cursor = max(start, date.fromisoformat(json.loads(path.read_text(encoding="utf-8")).get("last_date", start.isoformat())) )
         except (ValueError, OSError, json.JSONDecodeError): pass
-    if dry_run: return {"dates": (end - cursor).days + 1, "fixtures": 0, "statistics": 0, "requests": 0}
-    requests = fixtures_count = stats_count = 0
+    if dry_run: return {"dates": (end - cursor).days + 1, "fixtures": 0, "statistics": 0, "logical_operations": 0, "external_requests": 0, "cache_hits": 0}
+    logical_operations = external_requests = cache_hits = fixtures_count = stats_count = 0
     while cursor <= end:
-        if max_requests is not None and requests >= max_requests: break
-        items = await provider.fixtures_by_date(cursor.isoformat(), league=league, season=season); requests += 1
+        if max_requests is not None and external_requests >= max_requests: break
+        provider.request_budget = None if max_requests is None else max_requests - external_requests
+        items = await provider.fixtures_by_date(cursor.isoformat(), league=league, season=season); logical_operations += 1
+        events = list(provider.last_request_events); external_requests += sum(event.get("external_request", False) for event in events); cache_hits += int(provider.last_cache_hit)
         fixtures_count += ingest_fixtures(db, [x for x in items if x.status == "finished"])
         if include_stats:
             for item in items:
-                if item.status != "finished" or max_requests is not None and requests >= max_requests: continue
+                if item.status != "finished" or max_requests is not None and external_requests >= max_requests: continue
                 fixture = db.scalar(select(Fixture).where(Fixture.provider == item.provider, Fixture.provider_fixture_id == item.provider_fixture_id))
                 if fixture is None: continue
-                payload = await provider.detail("stats", item.provider_fixture_id); requests += 1
+                provider.request_budget = None if max_requests is None else max_requests - external_requests
+                payload = await provider.detail("stats", item.provider_fixture_id); logical_operations += 1
+                events = list(provider.last_request_events); external_requests += sum(event.get("external_request", False) for event in events); cache_hits += int(provider.last_cache_hit)
                 stats_count += store_statistics(db, fixture, item, payload)
         path.write_text(json.dumps({"last_date": cursor.isoformat()}), encoding="utf-8")
         cursor = date.fromordinal(cursor.toordinal() + 1)
-    return {"dates": (cursor - start).days, "fixtures": fixtures_count, "statistics": stats_count, "requests": requests}
+    provider.request_budget = None
+    return {"dates": (cursor - start).days, "fixtures": fixtures_count, "statistics": stats_count, "logical_operations": logical_operations, "external_requests": external_requests, "cache_hits": cache_hits}

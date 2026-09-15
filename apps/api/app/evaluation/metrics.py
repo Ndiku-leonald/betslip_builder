@@ -10,6 +10,15 @@ def rmse(predictions, outcomes) -> float: return (sum((float(p) - float(y)) ** 2
 def accuracy(predictions, outcomes) -> float: return sum(int(p == y) for p, y in zip(predictions, outcomes)) / max(1, len(predictions))
 
 
+def multiclass_brier(probability_rows, actual_classes) -> float:
+    """Proper multiclass Brier: mean sum((p_k - 1[y=k])^2) per fixture."""
+    return sum(sum((float(probability.get(label, 0.0)) - float(label == actual)) ** 2 for label in ("home", "draw", "away")) for probability, actual in zip(probability_rows, actual_classes)) / max(1, len(actual_classes))
+
+
+def categorical_log_loss(probability_rows, actual_classes) -> float:
+    return -sum(math.log(max(1e-12, float(probability.get(actual, 0.0)))) for probability, actual in zip(probability_rows, actual_classes)) / max(1, len(actual_classes))
+
+
 def expected_calibration_error(predictions, outcomes, bins: int = 10) -> float:
     total = len(predictions); error = 0.0
     if not total: return 0.0

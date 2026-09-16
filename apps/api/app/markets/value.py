@@ -65,11 +65,32 @@ def _outcome_contract(market):
     return None
 
 
+def handicap_home_line(market) -> float | None:
+    """Return a handicap/spread line from the home team's perspective."""
+    if market.market_family not in {"handicap", "spread"} or market.line is None or market.participant not in {"home", "away"}:
+        return None
+    return float(market.line) if market.participant == "home" else -float(market.line)
+
+
+def market_group_key(market):
+    """Preserve market context while joining the two sides of a line market."""
+    line = handicap_home_line(market) if market.market_family in {"handicap", "spread"} else market.line
+    participant = None if market.market_family in {"handicap", "spread"} else market.participant
+    return (market.provider, market.fixture_id, market.bookmaker, market.market_family, market.market_type, market.period, market.settlement_semantics, participant, line)
+
+
 def _compatible_market_group(market, group) -> tuple[bool, str]:
     contract = _outcome_contract(market)
-    if contract is None: return False, "not_applicable"
+    if contract is None and market.market_family not in {"handicap", "spread"}: return False, "not_applicable"
     if not group: return False, "incomplete_market"
     comparable = [item for item in group if getattr(item, "status", getattr(item, "market_status", "open")) == "open" and item.decimal_odds is not None]
+    if market.market_family in {"handicap", "spread"}:
+        context = (market.provider, market.fixture_id, market.bookmaker, market.market_family, market.market_type, market.period, market.settlement_semantics)
+        if not all((item.provider, item.fixture_id, item.bookmaker, item.market_family, item.market_type, item.period, item.settlement_semantics) == context for item in comparable): return False, "incomplete_market"
+        participants = {item.participant for item in comparable}
+        lines = {round(handicap_home_line(item), 8) for item in comparable}
+        complete = participants == {"home", "away"} and lines == {round(handicap_home_line(market), 8)} and all(item.selection == "win" for item in comparable)
+        return complete, "complete_market" if complete else "incomplete_market"
     context = (market.provider, market.fixture_id, market.bookmaker, market.market_family, market.market_type, market.period, market.participant, market.line, market.settlement_semantics)
     if not all((item.provider, item.fixture_id, item.bookmaker, item.market_family, item.market_type, item.period, item.participant, item.line, item.settlement_semantics) == context for item in comparable): return False, "incomplete_market"
     return ({item.selection for item in comparable} == contract), "complete_market" if {item.selection for item in comparable} == contract else "incomplete_market"
@@ -124,11 +145,12 @@ class MarketValueService:
             if item.get("material_provider_conflict") or (item.get("provider_agreement") is not None and item["provider_agreement"] < min_provider_agreement): continue
             if item.get("calibration_status", "insufficient_calibration") not in thresholds["calibration"]: continue
             if item.get("market_reliability") is None or item.get("market_reliability", 0) < thresholds["market_reliability"]: continue
-            if item.get("model_win_probability", item.get("model_probability", 0)) < thresholds["probability"] or item.get("confidence", 0) < thresholds["confidence"] or item.get("data_quality", 0) < thresholds["data_quality"]: continue
+            ranking_probability = item.get("model_resolved_win_probability") if item.get("model_resolved_win_probability") is not None else item.get("model_win_probability", item.get("model_probability", 0))
+            if ranking_probability < thresholds["probability"] or item.get("confidence", 0) < thresholds["confidence"] or item.get("data_quality", 0) < thresholds["data_quality"]: continue
             edge = item.get("novig_probability_edge")
             if edge is None or edge < thresholds["edge"]: continue
             item = dict(item); freshness = item.get("freshness", {}); source = item.get("source_reliability") or 0; reliability = item.get("market_reliability") or 0; agreement = item.get("provider_agreement") or 0
-            item["ranking_score"] = round(100 * (0.22 * item["model_win_probability"] + 0.14 * item["confidence"] / 100 + 0.12 * item["data_quality"] / 100 + 0.16 * reliability / 100 + 0.12 * min(1, max(0, edge)) + 0.08 * min(1, max(0, item.get("expected_value", 0) or 0)) + 0.08 * min(1, source / 100) + 0.04 * agreement + 0.04 * (1 if freshness.get("status") == "CURRENT" else 0)), 2)
-            item["ranking_components"] = {"model_probability": item["model_win_probability"], "confidence": item["confidence"], "data_quality": item["data_quality"], "market_reliability": reliability, "calibration_status": item.get("calibration_status"), "no_vig_edge": edge, "expected_value": item.get("expected_value"), "price_freshness": freshness, "source_reliability": source, "provider_agreement": agreement}
+            item["ranking_score"] = round(100 * (0.22 * ranking_probability + 0.14 * item["confidence"] / 100 + 0.12 * item["data_quality"] / 100 + 0.16 * reliability / 100 + 0.12 * min(1, max(0, edge)) + 0.08 * min(1, max(0, item.get("expected_value", 0) or 0)) + 0.08 * min(1, source / 100) + 0.04 * agreement + 0.04 * (1 if freshness.get("status") == "CURRENT" else 0)), 2)
+            item["ranking_components"] = {"model_probability": ranking_probability, "confidence": item["confidence"], "data_quality": item["data_quality"], "market_reliability": reliability, "calibration_status": item.get("calibration_status"), "no_vig_edge": edge, "expected_value": item.get("expected_value"), "price_freshness": freshness, "source_reliability": source, "provider_agreement": agreement}
             result.append(item)
         return sorted(result, key=lambda item: item["ranking_score"], reverse=True)

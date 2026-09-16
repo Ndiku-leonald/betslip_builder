@@ -11,6 +11,7 @@ from app.markets.storage import latest_market_snapshots, market_snapshot_history
 from app.odds.math import expected_value, fair_decimal_odds, fair_decimal_odds_with_push, implied_probability, no_vig, overround
 from app.odds.ontology import NormalizedMarket, decimal_odds, normalize_external_market
 from app.odds.providers import parse_api_sports_odds, parse_the_odds_api
+from app.main import _family_for_market
 from app.prediction.football import FootballPoissonModel
 from app.features.common import FeatureRow
 
@@ -52,6 +53,30 @@ def test_documented_provider_payloads_are_normalized():
     assert {item.selection for item in basketball} == {"home", "away"} and all(item.settlement_semantics == "including_overtime" for item in basketball)
 
 
+def test_realistic_api_sports_participant_market_payloads_are_normalized():
+    payload = {"response": [{
+        "fixture": {"id": 9001, "update": "2026-09-16T10:00:00+00:00"},
+        "teams": {"home": {"name": "Manchester City"}, "away": {"name": "Liverpool"}},
+        "bookmakers": [{"name": "API Book", "bets": [
+            {"name": "Match Winner", "values": [
+                {"value": "Manchester City", "odd": "1.50"}, {"value": "Draw", "odd": "4.00"}, {"value": "Liverpool", "odd": "5.50"}
+            ]},
+            {"name": "Asian Handicap", "values": [
+                {"value": "Home", "handicap": "-0.5", "odd": "1.90"}, {"value": "Away", "handicap": "+0.5", "odd": "1.95"}
+            ]},
+            {"name": "Home Team Total Goals", "values": [{"value": "Over 1.5", "odd": "1.80"}]},
+            {"name": "Away Team Total Goals", "values": [{"value": "Under 1.5", "odd": "1.85"}]},
+            {"name": "Game Total Goals", "values": [{"value": "Over 2.5", "odd": "1.90"}, {"value": "Under 2.5", "odd": "1.90"}]},
+        ]}],
+    }]}
+    markets = parse_api_sports_odds(payload, "fixture-9001", "football")
+    assert {item.selection for item in markets if item.market_family == "1x2"} == {"home", "draw", "away"}
+    handicaps = [item for item in markets if item.market_family == "handicap"]
+    assert {(item.participant, item.selection, item.line) for item in handicaps} == {("home", "win", -.5), ("away", "win", .5)}
+    assert {(item.participant, item.selection, item.line) for item in markets if item.market_family == "team_total"} == {("home", "over", 1.5), ("away", "under", 1.5)}
+    assert {(item.market_family, item.selection, item.line) for item in markets if item.market_family in {"totals", "game_total"}} == {("totals", "over", 2.5), ("totals", "under", 2.5)}
+
+
 def test_ambiguous_actual_team_name_is_rejected():
     with pytest.raises(ValueError, match="ambiguous team normalization"):
         parse_the_odds_api([{"id": "event-1", "home_team": "Manchester City", "away_team": "Liverpool", "bookmakers": [{"title": "Book", "markets": [{"key": "h2h", "outcomes": [{"name": "Arsenal", "price": 2.0}]}]}]}], "f", "football")
@@ -84,6 +109,36 @@ def test_incomplete_market_never_de_vigs():
     current = [market(selection="home", decimal_odds=2.0), market(selection="away", decimal_odds=4.0)]
     value = MarketValueService().evaluate(current[0], .6, market_group=current)
     assert value["no_vig_status"] == "incomplete_market" and value["no_vig_probability"] is None and value["novig_probability_edge"] is None
+
+
+@pytest.mark.parametrize("sport,family,home_line,away_line", [("football", "handicap", -.5, .5), ("basketball", "spread", -5.5, 5.5)])
+def test_two_way_handicap_and_spread_markets_use_home_perspective_line(sport, family, home_line, away_line):
+    now = datetime.now(timezone.utc)
+    home = market(sport=sport, market_family=family, market_type=family, participant="home", selection="win", line=home_line, decimal_odds=1.9, observed_at=now)
+    away = market(sport=sport, market_family=family, market_type=family, participant="away", selection="win", line=away_line, decimal_odds=2.1, observed_at=now)
+    home_value = MarketValueService().evaluate(home, model_probability_structure={"win_probability": .68, "push_probability": 0, "loss_probability": .32, "calibration_status": "fitted"}, market_group=[home, away], confidence=80, data_quality=80, market_reliability=80, provider_agreement=None)
+    assert home_value["no_vig_status"] == "complete_market"
+    assert home_value["novig_probability_edge"] is not None
+
+
+def test_mismatched_handicap_lines_do_not_form_a_market():
+    home = market(market_family="handicap", market_type="handicap", participant="home", selection="win", line=-5.5)
+    away = market(market_family="handicap", market_type="handicap", participant="away", selection="win", line=4.5)
+    value = MarketValueService().evaluate(home, .6, market_group=[home, away])
+    assert value["no_vig_status"] == "incomplete_market"
+
+
+def test_whole_line_handicap_preserves_push_and_is_rankable_without_fake_agreement():
+    now = datetime.now(timezone.utc)
+    home = market(market_family="handicap", market_type="handicap", participant="home", selection="win", line=-1, decimal_odds=2.0, observed_at=now)
+    away = market(market_family="handicap", market_type="handicap", participant="away", selection="win", line=1, decimal_odds=2.0, observed_at=now)
+    service = MarketValueService()
+    value = service.evaluate(home, model_probability_structure={"win_probability": .45, "push_probability": .20, "loss_probability": .35, "calibration_status": "fitted"}, market_group=[home, away], confidence=80, data_quality=80, market_reliability=80, provider_agreement=None)
+    assert value["no_vig_status"] == "complete_market"
+    assert value["model_resolved_win_probability"] == pytest.approx(.45 / (.45 + .35))
+    assert value["model_push_probability"] == pytest.approx(.20)
+    assert value["expected_value"] == pytest.approx(.45 * 1 - .35)
+    assert service.rank([value], "balanced")
 
 
 def test_consensus_distinguishes_matching_minor_and_material_conflicts():
@@ -160,6 +215,15 @@ def test_consensus_ignores_provider_specific_ids_when_canonical_teams_match():
         {"provider": "livescore-football", "home_name": "Manchester City", "away_name": "Liverpool", "home_provider_id": 9982, "away_provider_id": 9983},
     ])
     assert result["agreement"] == 1 and not result["conflicts"]
+
+
+def test_single_source_consensus_is_unverified_not_perfect_agreement():
+    result = ProviderConsensusService().resolve([{"provider": "api-football", "home_score": 2, "away_score": 1}])
+    assert result["source_count"] == 1 and result["agreement"] is None and result["agreement_status"] == "unverified"
+
+
+def test_team_total_does_not_inherit_game_total_reliability_family():
+    assert _family_for_market(SimpleNamespace(market_family="team_total")) == "team_total"
 
 
 def test_provider_agreement_is_a_hard_ranking_gate():

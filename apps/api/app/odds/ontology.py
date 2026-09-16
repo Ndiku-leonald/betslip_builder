@@ -96,7 +96,7 @@ def normalize_external_market(*, fixture_id: str, sport: str, provider: str, boo
         family, market_type = "btts", "btts"
     elif "spread" in label or "handicap" in label:
         family, market_type = "spread" if sport == "basketball" else "handicap", "spread" if sport == "basketball" else "handicap"
-    elif "team total" in label:
+    elif "team total" in label or ("total" in label and re.search(r"\b(home|away)\b.*\b(team|total)\b|\b(team|total)\b.*\b(home|away)\b", label)):
         family, market_type = "team_total", "team_total"
     elif "total" in label or "over/under" in label or label.startswith(("over", "under")):
         family, market_type = ("game_total", "game_total") if sport == "basketball" else ("totals", "total_goals")

@@ -14,7 +14,7 @@ class ProviderConsensusService:
     priorities = {"api-football": 100, "api-basketball": 100, "livescore-football": 60, "easy-soccer-data": 20}
 
     def resolve(self, observations: list, *, primary_source: str | None = None, fixture_id: str | None = None, db: Session | None = None) -> dict:
-        if not observations: return {"fields": {}, "source_count": 0, "agreement": 0.0, "conflicts": []}
+        if not observations: return {"fields": {}, "source_count": 0, "agreement": None, "agreement_status": "unverified", "conflicts": [], "material_conflict": False}
         observations = sorted(observations, key=lambda item: self.priorities.get(self._get(item, "provider") or "", 0), reverse=True)
         primary = primary_source or self._get(observations[0], "provider")
         fields = {}; conflicts = []
@@ -22,8 +22,8 @@ class ProviderConsensusService:
             present = [(item, self._get(item, field)) for item in observations if self._get(item, field) is not None]
             if not present: continue
             source_item, value = present[0]; agreements = [self._agreement(field, value, other) for _, other in present[1:]]
-            agreement = sum(agreements) / len(agreements) if agreements else 1.0
-            fields[field] = {"value": value, "agreement": round(agreement, 3), "sources": [self._get(item, "provider") for item, _ in present]}
+            agreement = sum(agreements) / len(agreements) if agreements else None
+            fields[field] = {"value": value, "agreement": round(agreement, 3) if agreement is not None else None, "sources": [self._get(item, "provider") for item, _ in present]}
             for (other_item, other), score in zip(present[1:], agreements):
                 if score >= 1: continue
                 severity = "minor" if score >= .8 else "material" if field in {"home_score", "away_score", "status", "home_team", "away_team"} else "conflict"
@@ -31,8 +31,10 @@ class ProviderConsensusService:
                 conflicts.append(conflict)
                 if db is not None and fixture_id is not None and not self._duplicate_conflict(db, conflict): db.add(ProviderConflict(**conflict))
         if db is not None: db.commit()
-        overall = sum(item["agreement"] for item in fields.values()) / len(fields) if fields else 0.0
-        return {"fields": fields, "source_count": len(observations), "agreement": round(overall, 3), "conflicts": conflicts, "material_conflict": any(item["severity"] == "material" for item in conflicts)}
+        measured = [item["agreement"] for item in fields.values() if item["agreement"] is not None]
+        overall = sum(measured) / len(measured) if measured else None
+        multi_source = len(observations) > 1
+        return {"fields": fields, "source_count": len(observations), "agreement": round(overall, 3) if multi_source and overall is not None else None, "agreement_status": "verified" if multi_source else "unverified", "conflicts": conflicts, "material_conflict": any(item["severity"] == "material" for item in conflicts)}
 
     @staticmethod
     def _get(item, field):

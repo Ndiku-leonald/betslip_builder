@@ -3,6 +3,7 @@ import pytest
 from app.cache import MemoryCache
 from app.providers.api_sports import normalize_basketball, normalize_football, normalize_status
 from app.providers.api_sports import ApiSportsProvider
+from app.providers.livescore_football import LiveScoreFootballProvider
 from app.quota import QuotaManager
 
 
@@ -38,6 +39,56 @@ def test_status_normalization_handles_finished_and_unknown() -> None:
     assert normalize_status("football", "FT") == "finished"
     assert normalize_status("basketball", "NS") == "scheduled"
     assert normalize_status("football", "???") == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_livescore_league_catalog_resolves_canonical_names_without_slug_guessing() -> None:
+    import app.providers.livescore_football as module
+
+    calls = []
+    catalog = {"leagues": [
+        {"slug": "eng.1", "name": "Premier League", "country": "England"},
+        {"slug": "esp.1", "name": "LaLiga", "country": "Spain"},
+    ]}
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, payload): self.payload = payload
+        def json(self): return self.payload
+
+    class Client:
+        async def get(self, url, params=None, **kwargs):
+            calls.append((url, params))
+            return Response(catalog if url.endswith("/leagues") else {"fixtures": []})
+
+    provider = LiveScoreFootballProvider("https://provider.test", client=Client(), cache=MemoryCache())
+    assert (await provider.resolve_league("Premier League"))["slug"] == "eng.1"
+    assert (await provider.resolve_league("La Liga"))["slug"] == "esp.1"
+    unknown = await provider.resolve_league("Unknown Competition")
+    assert unknown["status"] == "not_matched"
+    assert all("premier-league" not in str(item) for item in calls)
+
+
+@pytest.mark.asyncio
+async def test_livescore_date_contract_uses_compact_fixture_range_and_scoreboard_date() -> None:
+    calls = []
+
+    class Response:
+        status_code = 200
+        headers = {}
+        def json(self): return {"fixtures": []}
+
+    class Client:
+        async def get(self, url, params=None, **kwargs):
+            calls.append((url, params)); return Response()
+
+    provider = LiveScoreFootballProvider("https://provider.test", client=Client(), cache=MemoryCache())
+    await provider.fixtures("eng.1", date="2026-09-16")
+    await provider.scoreboard("eng.1", date="2026-09-16")
+    assert calls[0] == ("https://provider.test/get/soccer/eng.1/fixtures", {"status": "all", "from": "20260916", "to": "20260916"})
+    assert calls[1] == ("https://provider.test/get/soccer/eng.1/scoreboard", {"dates": "20260916"})
 
 
 @pytest.mark.asyncio

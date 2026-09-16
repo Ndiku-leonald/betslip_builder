@@ -21,7 +21,7 @@ from app.providers.matching import match_fixture
 from app.odds.providers import ApiSportsOddsProvider, TheOddsApiProvider, parse_the_odds_api
 from app.markets.consensus import ProviderConsensusService
 from app.markets.storage import latest_market_snapshots, market_snapshot_history, persist_market_snapshots, persist_provider_observation, latest_provider_observations
-from app.markets.value import MarketValueService, odds_consensus
+from app.markets.value import MarketValueService, odds_consensus, market_group_key
 from app.markets.compatibility import model_probability
 from app.odds.ontology import NormalizedMarket
 from app.providers.reliability import source_reliability, SOURCE_ROLES
@@ -359,7 +359,7 @@ def _market_key(market: OddsSnapshot) -> str | None:
 
 
 def _family_for_market(market: OddsSnapshot) -> str:
-    return {"1x2": "1X2", "moneyline": "moneyline", "btts": "btts", "totals": "totals", "game_total": "totals", "team_total": "totals", "handicap": "handicap", "spread": "spread"}.get(market.market_family or "", market.market_family or "unknown")
+    return {"1x2": "1X2", "moneyline": "moneyline", "btts": "btts", "totals": "totals", "game_total": "totals", "team_total": "team_total", "handicap": "handicap", "spread": "spread"}.get(market.market_family or "", market.market_family or "unknown")
 
 
 def _model_market_reliability(db: Session, market: OddsSnapshot, prediction: Prediction | None) -> tuple[float | None, dict]:
@@ -443,13 +443,13 @@ def fixture_market_values(fixture_id: str, profile: str = Query(default="balance
     snapshots = latest_market_snapshots(db, fixture_id); values = []; normalized_snapshots = []
     grouped_snapshots = {}
     for item in snapshots:
-        group_key = (item.bookmaker, item.market_family, item.market_type, item.period, item.line, item.participant)
+        group_key = market_group_key(item)
         grouped_snapshots.setdefault(group_key, []).append(item)
     for snapshot in snapshots:
         model_info = _model_probability_for_snapshot(db, snapshot, prediction)
         normalized = NormalizedMarket(fixture_id=snapshot.fixture_id, sport=(prediction.sport if prediction else "football"), bookmaker=snapshot.bookmaker or "", provider=snapshot.provider, market_family=snapshot.market_family or "unknown", market_type=snapshot.market_type or "unknown", period=snapshot.period or "full_game", participant=snapshot.participant or "none", selection=snapshot.selection or "unknown", line=snapshot.line, decimal_odds=snapshot.decimal_odds, status=snapshot.market_status, settlement_semantics=snapshot.settlement_semantics or "full_game", observed_at=snapshot.observed_at or snapshot.created_at, provider_updated_at=snapshot.provider_updated_at, source_event_id=snapshot.source_event_id, raw=snapshot.payload)
         normalized_snapshots.append(normalized)
-        group_key = (snapshot.bookmaker, snapshot.market_family, snapshot.market_type, snapshot.period, snapshot.line, snapshot.participant)
+        group_key = market_group_key(snapshot)
         group = [NormalizedMarket(fixture_id=item.fixture_id, sport=normalized.sport, bookmaker=item.bookmaker or "", provider=item.provider, market_family=item.market_family or "unknown", market_type=item.market_type or "unknown", period=item.period or "full_game", participant=item.participant or "none", selection=item.selection or "unknown", line=item.line, decimal_odds=item.decimal_odds, status=item.market_status, settlement_semantics=item.settlement_semantics or "full_game", observed_at=item.observed_at or item.created_at, provider_updated_at=item.provider_updated_at, source_event_id=item.source_event_id, raw=item.payload) for item in grouped_snapshots[group_key]]
         reliability, reliability_components = _model_market_reliability(db, snapshot, prediction)
         agreement_data = _stored_consensus(db, fixture_id)
@@ -494,11 +494,16 @@ async def provider_consensus(fixture_id: str, db: Session = Depends(get_db)) -> 
     observations = [primary_observation]
     if secondary_football is not None and primary.sport == "football":
         try:
-            league = (primary.competition or "football").lower().replace(" ", "-")
-            candidates = await secondary_football.fixtures_by_date(primary.kickoff_at.date().isoformat() if primary.kickoff_at else _app_today().isoformat(), league=league)
+            league_mapping = await secondary_football.resolve_league(primary.competition or "")
+            if league_mapping.get("status") != "matched":
+                secondary_status = {"provider": secondary_football.name, "status": league_mapping.get("status", "not_matched"), "reason": "canonical competition was not uniquely verified in provider catalog", "league": league_mapping}
+                candidates = []
+            else:
+                candidates = await secondary_football.fixtures_by_date(primary.kickoff_at.date().isoformat() if primary.kickoff_at else _app_today().isoformat(), league=league_mapping["slug"])
             match = next((item for item in candidates if match_fixture({"home": item.home_name, "away": item.away_name, "competition": item.competition_name, "kickoff_at": item.kickoff_at}, [{"home": primary.home, "away": primary.away, "competition": primary.competition, "kickoff_at": primary.kickoff_at}])["status"] == "matched"), None)
             if match is None:
-                secondary_status = {"provider": secondary_football.name, "status": "not_matched", "reason": "no unambiguous secondary fixture match"}
+                if league_mapping.get("status") == "matched":
+                    secondary_status = {"provider": secondary_football.name, "status": "not_matched", "reason": "no unambiguous secondary fixture match"}
             else:
                 persist_provider_observation(db, fixture.id, match, canonical_home_team=primary.home, canonical_away_team=primary.away)
                 observations.append(match)
@@ -506,7 +511,7 @@ async def provider_consensus(fixture_id: str, db: Session = Depends(get_db)) -> 
         except Exception as exc:
             secondary_status = {"provider": secondary_football.name, "status": "unavailable", "reason": str(exc)}
     consensus = consensus_service.resolve(observations, primary_source=fixture.provider, fixture_id=fixture_id, db=db)
-    return {"fixture_id": fixture_id, "primary": {"provider": fixture.provider, "status": "available", "home": primary.home, "away": primary.away, "observed_at": primary.observed_at, "provider_updated_at": primary.provider_updated_at}, "secondary": secondary_status, "consensus": consensus, "agreement": consensus["agreement"], "conflicts": consensus["conflicts"], "material_conflict": consensus["material_conflict"], "ranking_suppressed": consensus["material_conflict"] and consensus["agreement"] < settings.min_provider_agreement}
+    return {"fixture_id": fixture_id, "primary": {"provider": fixture.provider, "status": "available", "home": primary.home, "away": primary.away, "observed_at": primary.observed_at, "provider_updated_at": primary.provider_updated_at}, "secondary": secondary_status, "consensus": consensus, "agreement": consensus["agreement"], "agreement_status": consensus["agreement_status"], "source_count": consensus["source_count"], "conflicts": consensus["conflicts"], "material_conflict": consensus["material_conflict"], "ranking_suppressed": consensus["material_conflict"] and consensus["agreement"] is not None and consensus["agreement"] < settings.min_provider_agreement}
 
 
 @app.get("/api/conflicts")

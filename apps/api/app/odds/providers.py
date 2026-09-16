@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any, Protocol
 
 import httpx
@@ -32,7 +33,17 @@ def _participant(value: Any, market_key: str, event: dict) -> str | None:
     participant = _team_participant(value, event)
     if participant: return participant
     label = str(value or "").strip().lower()
-    if market_key in {"spreads", "handicap"}:
+    participant_market = any(token in market_key for token in ("spread", "handicap", "team total", "team_total"))
+    if participant_market:
+        if re.fullmatch(r"(?:home|home team|1|team 1)", label): return "home"
+        if re.fullmatch(r"(?:away|away team|2|team 2)", label): return "away"
+        # Some team-total feeds put the side in the bet/value label while the
+        # selection itself is only Over/Under.
+        if re.search(r"\bhome\b", label) and re.search(r"\bteam\b|\btotal\b", label): return "home"
+        if re.search(r"\baway\b", label) and re.search(r"\bteam\b|\btotal\b", label): return "away"
+        if re.search(r"\bhome\b", market_key) and "total" in market_key: return "home"
+        if re.search(r"\baway\b", market_key) and "total" in market_key: return "away"
+    if participant_market and ("spread" in market_key or "handicap" in market_key):
         raise ValueError(f"ambiguous team normalization for spread outcome: {value!r}")
     if market_key in {"h2h", "moneyline", "match winner", "1x2"} and label == "draw": return "none"
     if market_key in {"totals", "game total", "btts"}: return "none"

@@ -2,7 +2,7 @@
 
 ## Data flow
 
-Provider adapters call API-Sports with server-side credentials. Responses are validated into provider-neutral models, mapped to canonical internal IDs, and upserted into SQLAlchemy entities. FastAPI returns normalized records to the Next.js viewer. Fixture kickoff, observation time, optional provider update time, freshness, usage, and health are retained separately along the way.
+Provider adapters call upstream services with server-side credentials. Responses are validated into provider-neutral models, mapped to canonical internal IDs, and persisted into SQLAlchemy entities. FastAPI returns normalized records to the Next.js viewer. Fixture kickoff, observation time, optional provider update time, freshness, usage, and health are retained separately along the way. Stage Three odds are stored as immutable normalized snapshots rather than overwriting prior observations.
 
 ## Canonical IDs
 
@@ -16,6 +16,6 @@ Internal UUID-like string identifiers are the primary application identifiers. `
 
 APScheduler is an optional process-local scheduler. Free mode does not start aggressive polling. Explicit ingestion is available through the service/CLI, and scheduled jobs can be enabled with `ENABLE_SCHEDULED_INGESTION=true`. Do not enable it in every OS process of a multi-worker production deployment: run one dedicated scheduler process until a distributed queue replaces it.
 
-## Future layers
+## Stage Three market layer
 
-The schema already reserves markets, odds, predictions, model versions, slips, and legs. These are intentionally inactive in Phase 1. Future model, market-selection, live-model, and optimizer services should consume normalized snapshots, freshness, and data-quality signals rather than provider payloads.
+The schema reserves markets, odds, predictions, model versions, slips, and legs. Stage Three activates only the market-intelligence portion: normalized odds snapshots, provider conflicts, settlement-aware model compatibility, no-vig pricing, expected value, freshness gates, and profile-based ranking. Market and value services consume normalized snapshots, model outputs, freshness, and data-quality signals rather than provider payloads. Accumulator construction, live probability updates, and automated betting remain outside this stage.

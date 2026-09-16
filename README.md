@@ -1,8 +1,8 @@
 # SlipIQ
 
-SlipIQ is a production-oriented sports data and statistical modeling foundation for football and basketball analytics. Stage Two adds historical, leakage-safe probability models and model review surfaces. It does not optimize slips, compare odds, place bets, or present fabricated selections.
+SlipIQ is a production-oriented sports data and statistical modeling foundation for football and basketball analytics. Stage Two adds historical, leakage-safe probability models and model review surfaces. Stage Three adds normalized market intelligence and price-gap analysis. It does not optimize slips, place bets, or present fabricated selections.
 
-## Stage One and Two status
+## Stage One, Two, and Three status
 
 - FastAPI backend with SQLAlchemy/Alembic and SQLite or PostgreSQL.
 - API-Sports adapters for API-Football and API-Basketball.
@@ -12,6 +12,8 @@ SlipIQ is a production-oriented sports data and statistical modeling foundation 
 - Historical backfill commands, normalized team-match statistics, chronological feature snapshots, football Poisson/Dixon-Coles and basketball expected-score baselines.
 - Candidate model versioning, validation-only calibration, walk-forward evaluation, prediction API and a clearly labeled model-estimate tab on fixture pages.
 - Evaluation splits are atomic by exact observation timestamp; same-kickoff fixtures remain in one partition. Candidate and fold-local baseline metrics use identical held-out fixture IDs, including a true league-average Poisson baseline.
+- Normalized odds ontology, immutable odds snapshots, documented odds-provider adapters, explicit settlement compatibility, no-vig pricing, expected value, freshness gates, and risk-profile ranking.
+- Market intelligence APIs and frontend surfaces for fixture markets, value opportunities, odds movement, provider status, and conflict visibility. Stage Three does not construct accumulators or place bets.
 
 ## Architecture
 
@@ -100,6 +102,15 @@ Each operation reports `PASS`, `SKIPPED`, or `FAILED`; API keys are never printe
 
 APScheduler is process-local. It is suitable for development and a single-worker deployment only. In production multi-worker FastAPI deployments, run the API with scheduled ingestion disabled in every worker and run one dedicated scheduler process (`ENABLE_SCHEDULED_INGESTION=true`) until a distributed job system is introduced.
 
+## Stage Three market-intelligence workflow
+
+1. Configure an approved odds source (`THE_ODDS_API_KEY` for The Odds API, or an API-Sports key for fixture-scoped odds).
+2. Ingest odds through the refresh endpoints; snapshots are append-only and retain provider, bookmaker, selection, line, settlement semantics, and observation time.
+3. Review `/value` or the fixture-level Market intelligence tab. A candidate is shown only when odds are fresh, the market is model-supported, settlement semantics are compatible, and the selected profile's confidence, data-quality, and edge thresholds pass.
+4. Treat secondary football sources as verification context. They do not overwrite primary canonical fixture data, and conflicts remain observable through `/api/conflicts`.
+
+The Stage Three API does not scrape bookmaker sites, bypass anti-bot controls, infer missing prices, or claim that a positive edge is guaranteed.
+
 ## Real data limitations
 
 Coverage varies by competition and subscription plan. Optional events, statistics, lineups, injuries, and odds may be unavailable. SlipIQ preserves that absence instead of inventing values. The frontend labels provider errors, stale data, and unavailable fields.
@@ -119,7 +130,7 @@ CI runs backend tests and frontend lint/typecheck/test/build without requiring p
 
 ## Git workflow
 
-Development happens on `develop`; `main` is not modified by Stage One or Stage Two. Commit meaningful milestones and push them to `origin/develop` for review.
+Development happens on `develop`; `main` is not modified by the staged work. Commit meaningful milestones and push them to `origin/develop` for review.
 
 ## Stage Two research workflow
 

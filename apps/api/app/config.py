@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     odds_refresh_seconds: int = 60
     enable_scheduled_ingestion: bool = False
     api_cors_origins: str = "http://localhost:3000"
+    livescore_football_base_url: str = "https://worldcup26.ir"
+    enable_livescore_football: bool = True
+    enable_easy_soccer_data: bool = False
+    the_odds_api_key: str | None = None
+    enable_odds_api: bool = False
+    odds_prematch_ttl_seconds: int = 1800
+    odds_live_ttl_seconds: int = 30
+    min_provider_agreement: float = 0.8
+    betpawa_feed_url: str | None = None
+    betpawa_api_key: str | None = None
 
     @field_validator("live_poll_seconds", "prematch_refresh_minutes", "odds_refresh_seconds", "api_football_daily_limit", "api_basketball_daily_limit")
     @classmethod

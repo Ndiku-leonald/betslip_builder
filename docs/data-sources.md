@@ -10,11 +10,13 @@ API-Football fixture details can include events, statistics, lineups, and player
 
 The adapter uses the official API-Sports basketball host `v1.basketball.api-sports.io`. Phase 1 calls countries, leagues, teams, date games, live games, game details, and the documented `games/statistics/teams` endpoint. Player statistics are exposed separately through `games/statistics/players`. Basketball status, periods, and scores are normalized independently from football; football events and lineups are not fabricated for basketball.
 
-## Future sources
+## Stage Three sources
 
-- The Odds API: secondary odds source behind an `OddsProvider` interface.
+- The Odds API: optional odds source behind an `OddsProvider` interface. It is disabled until `THE_ODDS_API_KEY` and `ENABLE_ODDS_API=true` are configured.
 - Open-Meteo: weather snapshots keyed to fixtures and venues.
-- BetPawa: only an approved feed/API via `BookmakerProvider`; no scraping or anti-bot bypass.
-- Sofascore, LiveScore, and Flashscore: optional secondary verification only through approved integrations.
+- BetPawa: only an approved feed/API via `BookmakerProvider`; no scraping or anti-bot bypass. The import adapter is disabled by default.
+- LiveScore Football: optional secondary football verification through the configured adapter. It never overwrites primary API-Sports observations by itself.
+- EasySoccerData: isolated experimental adapter, disabled by default and never required by core ingestion.
+- Sofascore and Flashscore: optional secondary verification only through approved integrations.
 
-No future source should become a hidden production dependency. Every record must retain its source and freshness.
+No source should become a hidden production dependency. Every record must retain its source and freshness. Provider conflicts remain observable instead of being silently averaged.

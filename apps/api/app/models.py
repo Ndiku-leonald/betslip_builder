@@ -204,6 +204,35 @@ class OddsSnapshot(TimestampMixin, Base):
     fixture_id: Mapped[str] = mapped_column(ForeignKey("fixtures.id"), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     provider: Mapped[str] = mapped_column(String(60))
+    source_event_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    bookmaker: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    market_family: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    market_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    period: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    selection: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decimal_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_status: Mapped[str] = mapped_column(String(30), default="open")
+    settlement_semantics: Mapped[str] = mapped_column(String(60), default="full_game")
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    provider_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProviderConflict(TimestampMixin, Base):
+    __tablename__ = "provider_conflicts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    fixture_id: Mapped[str] = mapped_column(ForeignKey("fixtures.id"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(60))
+    field: Mapped[str] = mapped_column(String(80))
+    primary_source: Mapped[str] = mapped_column(String(60))
+    secondary_source: Mapped[str] = mapped_column(String(60))
+    primary_value: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    secondary_value: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    severity: Mapped[str] = mapped_column(String(30))
+    resolution: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    resolved_source: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ProviderUsage(TimestampMixin, Base):

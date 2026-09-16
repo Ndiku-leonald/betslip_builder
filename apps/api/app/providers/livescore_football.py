@@ -23,11 +23,15 @@ class LiveScoreFootballProvider:
     configured = True
     capabilities = {"leagues": True, "fixtures": True, "live": True, "scores": True, "statistics": True, "events": True, "clubs": True, "standings": True}
 
-    def __init__(self, base_url: str = "https://worldcup26.ir", client=None, timeout: float = 15.0):
-        self.base_url = base_url.rstrip("/"); self.client = client; self.timeout = timeout
+    def __init__(self, base_url: str = "https://worldcup26.ir", client=None, timeout: float = 15.0, cache=None):
+        self.base_url = base_url.rstrip("/"); self.client = client; self.timeout = timeout; self.cache = cache
         self.last_success_at = None; self.last_error = None; self.last_latency_ms = None
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        cache_key = f"{self.name}:{path}:{sorted((params or {}).items())}"
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None: return cached
         try:
             if self.client is not None:
                 response = await self.client.get(f"{self.base_url}/{path.lstrip('/')}", params=params)
@@ -36,7 +40,9 @@ class LiveScoreFootballProvider:
                     response = await client.get(f"{self.base_url}/{path.lstrip('/')}", params=params)
             if response.status_code >= 400: raise LiveScoreFootballError(f"HTTP {response.status_code}")
             self.last_success_at = datetime.now(timezone.utc); self.last_error = None
-            return response.json()
+            payload = response.json()
+            if self.cache is not None: self.cache.set(cache_key, payload, 30 if "scoreboard" in path else 300)
+            return payload
         except (httpx.HTTPError, ValueError, LiveScoreFootballError) as exc:
             self.last_error = str(exc); raise LiveScoreFootballError(str(exc)) from exc
 
@@ -83,7 +89,7 @@ class LiveScoreFootballProvider:
             league = item.get("slug", item.get("id"))
             if league is not None:
                 payload = await self._get(f"get/soccer/{league}/scoreboard")
-                result.extend(self._normalize(event, str(league)) for event in self._items(payload, "events", "fixtures", "games", "data"))
+                result.extend(normalized for event in self._items(payload, "events", "fixtures", "games", "data") if (normalized := self._normalize(event, str(league))).status in {"live", "halftime"})
         return result
 
     async def detail(self, league: str, event_id: str, kind: str = "summary") -> dict:

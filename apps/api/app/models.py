@@ -209,6 +209,7 @@ class OddsSnapshot(TimestampMixin, Base):
     market_family: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
     market_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
     period: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    participant: Mapped[str] = mapped_column(String(20), default="none")
     selection: Mapped[str | None] = mapped_column(String(120), nullable=True)
     line: Mapped[float | None] = mapped_column(Float, nullable=True)
     decimal_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -216,6 +217,25 @@ class OddsSnapshot(TimestampMixin, Base):
     settlement_semantics: Mapped[str] = mapped_column(String(60), default="full_game")
     observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     provider_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProviderObservation(TimestampMixin, Base):
+    __tablename__ = "provider_observations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    fixture_id: Mapped[str] = mapped_column(ForeignKey("fixtures.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(60), index=True)
+    source_event_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    provider_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    kickoff_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    clock: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    period: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    canonical_home_team: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    canonical_away_team: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class ProviderConflict(TimestampMixin, Base):

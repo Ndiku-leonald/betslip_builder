@@ -4,7 +4,7 @@ Stage Three compares normalized bookmaker prices with the active model's support
 
 ## Data contract
 
-Every odds record is normalized into an `OddsSnapshot` with the internal fixture ID, provider, bookmaker, market family, market type, period, selection, line, decimal odds, status, settlement semantics, provider event ID, and observation timestamps. Snapshots are append-only so movement can be reconstructed and stale prices cannot silently replace history.
+Every odds record is normalized into an `OddsSnapshot` with the internal fixture ID, provider, bookmaker, market family, market type, period, participant, selection, line, decimal odds, status, settlement semantics, provider event ID, and observation timestamps. Snapshots are append-only so movement can be reconstructed and stale prices cannot silently replace history. See [odds.md](odds.md) for the canonical identity, timestamp, de-vig, and push-aware pricing contract.
 
 Supported provider paths are:
 
@@ -23,7 +23,13 @@ The value service calculates raw implied probability, no-vig probability when a 
 - model confidence and data-quality thresholds pass the selected risk profile; and
 - the no-vig edge is positive above that profile's threshold.
 
-Missing odds, unsupported markets, stale data, insufficient model support, and provider failures remain explicit empty or unavailable states.
+Missing odds, unsupported markets, stale data, insufficient model support, incomplete markets, insufficient calibration, and provider failures remain explicit states on fixture-level Market intelligence. The Value Finder filters these states from ranked opportunities.
+
+## Consensus and source agreement
+
+The primary API-Sports fixture remains authoritative for canonical identity. A cached, conservatively matched LiveScore Football observation can verify a football fixture. Provider IDs are metadata and are never compared as team facts; consensus compares canonical team names, exact scores, normalized statuses, clock tolerance, and kickoff tolerance. Material conflicts are persisted once per unresolved fact and suppress opportunity ranking when the configured `MIN_PROVIDER_AGREEMENT` policy is not met. The secondary source is never presented as authoritative.
+
+Provider observations are stored with source event ID, observation and update timestamps, kickoff, status, score, clock, period, canonical team mapping, and raw reference. Consensus reads recent stored observations before considering a narrowly scoped secondary fetch.
 
 ## API surfaces
 

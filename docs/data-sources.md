@@ -20,3 +20,5 @@ The adapter uses the official API-Sports basketball host `v1.basketball.api-spor
 - Sofascore and Flashscore: optional secondary verification only through approved integrations.
 
 No source should become a hidden production dependency. Every record must retain its source and freshness. Provider conflicts remain observable instead of being silently averaged.
+
+See [odds.md](odds.md) for provider timestamp precedence, exact team-name normalization, and the separation between source reliability and model-market reliability.

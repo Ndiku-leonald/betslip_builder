@@ -24,6 +24,13 @@ def fair_decimal_odds(probability: float) -> float:
     return 1.0 / max(1e-12, min(1.0, float(probability)))
 
 
+def fair_decimal_odds_with_push(win_probability: float, push_probability: float = 0.0, loss_probability: float | None = None) -> float:
+    """Fair refund-on-push price: 1 + P(loss) / P(win)."""
+    win = float(win_probability); push = float(push_probability); loss = 1 - win - push if loss_probability is None else float(loss_probability)
+    if win <= 0 or min(push, loss) < 0: raise ValueError("win, push and loss probabilities must be valid")
+    return 1 + loss / win
+
+
 def expected_value(probability: float, odds: float, *, push_probability: float = 0.0, loss_probability: float | None = None) -> float:
     if odds <= 1: raise ValueError("decimal odds must be greater than 1")
     p = float(probability); push = float(push_probability); loss = (1 - p - push) if loss_probability is None else float(loss_probability)

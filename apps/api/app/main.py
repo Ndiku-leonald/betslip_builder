@@ -226,7 +226,7 @@ def health() -> dict:
     except Exception:
         diagnostics["database_diagnostics"] = "unavailable"
     for provider in providers.values():
-        diagnostics["providers"].append({"provider": provider.name, "configured": provider.configured, "healthy": provider.last_error is None})
+        diagnostics["providers"].append({"provider": provider.name, "configured": provider.configured, "healthy": provider.configured and provider.last_error is None})
     return {"status": "ok", "service": "slipiq-api", "time": datetime.now(timezone.utc).isoformat(), "live": diagnostics}
 
 

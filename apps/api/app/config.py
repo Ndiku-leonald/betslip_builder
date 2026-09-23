@@ -8,12 +8,23 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=Path(__file__).resolve().parents[3] / ".env", extra="ignore")
+    app_env: Literal["development", "test", "production"] = "development"
+    app_process_role: Literal["web", "worker"] = "web"
+    log_level: str = "INFO"
+    app_version: str = "0.1.0"
+    release: str | None = None
     api_football_key: str | None = None
     api_basketball_key: str | None = None
     api_football_daily_limit: int | None = None
     api_basketball_daily_limit: int | None = None
     database_url: str = "sqlite:///./slipiq.db"
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_timeout: int = 30
+    db_pool_recycle: int = 1800
     redis_url: str | None = None
+    redis_required_in_production: bool = True
+    redis_key_prefix: str = "slipiq"
     app_timezone: str = "Africa/Kampala"
     quota_mode: Literal["free", "standard", "realtime"] = "free"
     live_poll_seconds: int = 60
@@ -21,6 +32,26 @@ class Settings(BaseSettings):
     odds_refresh_seconds: int = 60
     enable_scheduled_ingestion: bool = False
     api_cors_origins: str = "http://localhost:3000"
+    allowed_origins: str | None = None
+    trusted_hosts: str = "localhost,127.0.0.1"
+    api_rate_limit_enabled: bool = True
+    api_rate_limit_requests: int = 60
+    api_rate_limit_window_seconds: int = 60
+    expensive_rate_limit_requests: int = 10
+    expensive_rate_limit_window_seconds: int = 60
+    admin_token: str | None = None
+    enable_admin_endpoints: bool = True
+    enable_api_docs: bool = True
+    max_request_body_bytes: int = 1_000_000
+    request_id_max_length: int = 96
+    strict_security_headers: bool = True
+    metrics_enabled: bool = True
+    provider_connect_timeout: float = 5.0
+    provider_read_timeout: float = 15.0
+    provider_retry_attempts: int = 3
+    provider_retry_base_seconds: float = 0.5
+    provider_circuit_failure_threshold: int = 5
+    provider_circuit_cooldown_seconds: int = 30
     livescore_football_base_url: str = "https://worldcup26.ir"
     enable_livescore_football: bool = True
     enable_easy_soccer_data: bool = False
@@ -63,6 +94,20 @@ class Settings(BaseSettings):
             raise ValueError("live_min_confidence must be between 0 and 100")
         return value
 
+    @field_validator("db_pool_size", "db_max_overflow", "db_pool_timeout", "db_pool_recycle", "api_rate_limit_requests", "api_rate_limit_window_seconds", "expensive_rate_limit_requests", "expensive_rate_limit_window_seconds", "max_request_body_bytes", "request_id_max_length", "provider_retry_attempts", "provider_circuit_failure_threshold", "provider_circuit_cooldown_seconds")
+    @classmethod
+    def positive_operational_limits(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("operational limits must be positive")
+        return value
+
+    @field_validator("provider_connect_timeout", "provider_read_timeout", "provider_retry_base_seconds")
+    @classmethod
+    def positive_provider_limits(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("provider timeout/retry values must be positive")
+        return value
+
     @property
     def provider_daily_limits(self) -> dict[str, int]:
         limits = {"api-football": 100, "api-basketball": 100} if self.quota_mode == "free" else {}
@@ -73,7 +118,36 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> list[str]:
-        return [origin.strip() for origin in self.api_cors_origins.split(",") if origin.strip()]
+        raw = self.allowed_origins if self.allowed_origins is not None else self.api_cors_origins
+        return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+
+    @property
+    def trusted_host_list(self) -> list[str]:
+        return [host.strip() for host in self.trusted_hosts.split(",") if host.strip()]
+
+    @property
+    def effective_release(self) -> str:
+        return self.release or self.app_version
+
+
+def validate_production_settings(settings: Settings | None = None) -> None:
+    """Fail closed for deployment-critical production configuration."""
+    current = settings or get_settings()
+    if current.app_env != "production":
+        return
+    database = current.database_url.lower()
+    if not (database.startswith("postgresql://") or database.startswith("postgresql+")):
+        raise ValueError("production DATABASE_URL must use PostgreSQL")
+    if current.redis_required_in_production and not current.redis_url:
+        raise ValueError("production REDIS_URL is required")
+    if not current.cors_origins or "*" in current.cors_origins:
+        raise ValueError("production allowed origins must be explicit")
+    if not current.trusted_host_list or "*" in current.trusted_host_list:
+        raise ValueError("production TRUSTED_HOSTS must be explicit")
+    if current.app_process_role not in {"web", "worker"}:
+        raise ValueError("production APP_PROCESS_ROLE must be web or worker")
+    if current.enable_admin_endpoints and not current.admin_token:
+        raise ValueError("production admin endpoints require ADMIN_TOKEN")
 
 
 @lru_cache

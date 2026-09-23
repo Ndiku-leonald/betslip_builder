@@ -19,6 +19,9 @@ build/
 *.log
 coverage.xml
 .coverage
+*.coverage
+reports/
+tmp/
 playwright-report/
 test-results/
 .vitest-cache/

@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-slipiq}
+      POSTGRES_USER: ${POSTGRES_USER:-slipiq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-local-only}
+    volumes: [slipiq-postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    volumes: [slipiq-redis:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  api:
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    environment:
+      APP_ENV: production
+      APP_PROCESS_ROLE: web
+      DATABASE_URL: postgresql+psycopg://slipiq:${POSTGRES_PASSWORD:-change-me-local-only}@postgres:5432/${POSTGRES_DB:-slipiq}
+      REDIS_URL: redis://redis:6379/0
+      REDIS_REQUIRED_IN_PRODUCTION: "true"
+      ALLOWED_ORIGINS: http://localhost:3000
+      TRUSTED_HOSTS: localhost,api
+      ENABLE_SCHEDULED_INGESTION: "false"
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports: ["8000:8000"]
+  worker:
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    command: ["python", "-m", "app.worker"]
+    environment:
+      APP_ENV: production
+      APP_PROCESS_ROLE: worker
+      DATABASE_URL: postgresql+psycopg://slipiq:${POSTGRES_PASSWORD:-change-me-local-only}@postgres:5432/${POSTGRES_DB:-slipiq}
+      REDIS_URL: redis://redis:6379/0
+      REDIS_REQUIRED_IN_PRODUCTION: "true"
+      TRUSTED_HOSTS: localhost,worker
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN}
+      ENABLE_SCHEDULED_INGESTION: "true"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8000}"
+    depends_on: [api]
+    ports: ["3000:3000"]
+volumes:
+  slipiq-postgres:
+  slipiq-redis:

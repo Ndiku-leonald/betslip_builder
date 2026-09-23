@@ -1,17 +1,22 @@
 import logging
+import time as time_module
 from dataclasses import replace
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.cache import CacheBackend
-from app.config import get_settings
+from app.config import get_settings, validate_production_settings
 from app.db import SessionLocal, get_db
 from app.freshness import data_age_seconds
 from app.models import BacktestRun, Competition, Fixture, LiveMatchSnapshot, ModelVersion, OddsSnapshot, Prediction, ProviderConflict, ProviderHealth, ProviderObservation, ProviderUsage, Slip, SlipLeg, Sport, Team
@@ -38,14 +43,17 @@ from app.prediction.service import PredictionService, PredictionUnavailable
 from app.services.ingestion import ingest_fixtures
 from app.slips.config import PROFILE_CONFIG
 from app.slips.optimizer import SlipOptimizer
+from app.observability import Metrics, configure_logging
+from app.security import InMemoryRateLimiter, RateLimitMiddleware, RedisRateLimiter, RequestContextMiddleware, RequestSizeLimitMiddleware, SecurityHeadersMiddleware, redact_secrets, require_admin
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 settings = get_settings()
-cache = CacheBackend(settings.redis_url)
+configure_logging(settings.log_level)
+cache = CacheBackend(settings.redis_url, required=settings.app_env == "production" and settings.redis_required_in_production, namespace=settings.redis_key_prefix)
 quota_store = PersistentQuotaStore(SessionLocal)
 quota = QuotaManager(settings.quota_mode, daily_limits=settings.provider_daily_limits, count_callback=quota_store.count_today, reserve_callback=quota_store.reserve, complete_callback=quota_store.complete)
-football = ApiSportsProvider(name="api-football", key=settings.api_football_key, base_url="https://v3.football.api-sports.io", cache=cache, quota=quota)
-basketball = ApiSportsProvider(name="api-basketball", key=settings.api_basketball_key, base_url="https://v1.basketball.api-sports.io", cache=cache, quota=quota)
+provider_options = {"connect_timeout": settings.provider_connect_timeout, "read_timeout": settings.provider_read_timeout, "retry_attempts": settings.provider_retry_attempts, "retry_base_seconds": settings.provider_retry_base_seconds, "circuit_failure_threshold": settings.provider_circuit_failure_threshold, "circuit_cooldown_seconds": settings.provider_circuit_cooldown_seconds}
+football = ApiSportsProvider(name="api-football", key=settings.api_football_key, base_url="https://v3.football.api-sports.io", cache=cache, quota=quota, **provider_options)
+basketball = ApiSportsProvider(name="api-basketball", key=settings.api_basketball_key, base_url="https://v1.basketball.api-sports.io", cache=cache, quota=quota, **provider_options)
 providers = {"football": football, "basketball": basketball}
 secondary_football = LiveScoreFootballProvider(settings.livescore_football_base_url, cache=cache) if settings.enable_livescore_football else None
 experimental_football = EasySoccerDataProvider(settings.enable_easy_soccer_data)
@@ -55,6 +63,7 @@ consensus_service = ProviderConsensusService()
 market_value_service = MarketValueService()
 scheduler: AsyncIOScheduler | None = None
 app_timezone = ZoneInfo(settings.app_timezone)
+metrics = Metrics()
 prediction_service = PredictionService()
 live_service = LiveIntelligenceService()
 slip_optimizer = SlipOptimizer()
@@ -114,6 +123,8 @@ def _record_usage(provider: ApiSportsProvider, endpoint: str, *, status_code: in
             db.flush()
         health.calls_today = int(db.scalar(select(func.count(ProviderUsage.id)).where(ProviderUsage.provider == provider.name, ProviderUsage.requested_at >= _utc_day_start(), ProviderUsage.cache_hit.is_(False), ProviderUsage.external_request.is_(True))) or 0)
         db.commit()
+        metrics.inc("provider_requests_total", len(events))
+        metrics.inc("provider_failures_total", sum(1 for event in events if event.get("error")))
 
 
 async def _scheduled_today(sport: str) -> None:
@@ -167,7 +178,7 @@ async def _scheduled_live(sport: str) -> None:
 
 async def start_scheduler() -> None:
     global scheduler
-    if settings.enable_scheduled_ingestion:
+    if settings.enable_scheduled_ingestion and (settings.app_env != "production" or settings.app_process_role == "worker"):
         if scheduler is not None and scheduler.running:
             return
         scheduler = AsyncIOScheduler(timezone=settings.app_timezone)
@@ -189,15 +200,52 @@ async def stop_scheduler() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    validate_production_settings(settings)
+    app.state.ready = False
+    if settings.app_env == "production":
+        with SessionLocal() as db:
+            db.execute(select(1))
+        if settings.redis_required_in_production and not cache.available:
+            raise RuntimeError("Redis is required but unavailable")
     await start_scheduler()
+    app.state.ready = True
     try:
         yield
     finally:
+        app.state.ready = False
         await stop_scheduler()
+        cache.close()
+
+app = FastAPI(title="SlipIQ API", version=settings.effective_release, description="Normalized sports data and responsible market intelligence; no bet placement.", lifespan=lifespan, docs_url="/docs" if settings.enable_api_docs else None, redoc_url="/redoc" if settings.enable_api_docs else None)
+app.state.settings = settings
+app.state.metrics = metrics
+app.state.ready = False
+_trusted_hosts = settings.trusted_host_list + ([] if settings.app_env == "production" else ["testserver"])
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_hosts)
+app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False, allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"])
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestContextMiddleware)
+app.add_middleware(RequestSizeLimitMiddleware)
+if settings.api_rate_limit_enabled:
+    _rate_limiter = RedisRateLimiter(cache.backend.client, namespace=f"{settings.redis_key_prefix}:rate") if getattr(cache.backend, "client", None) is not None and cache.available else InMemoryRateLimiter()
+    app.add_middleware(RateLimitMiddleware, limiter=_rate_limiter, enabled=True)
 
 
-app = FastAPI(title="SlipIQ API", version="0.1.0", description="Normalized sports data and responsible market intelligence; no bet placement.", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False, allow_methods=["GET", "POST"], allow_headers=["*"])
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"code": "VALIDATION_ERROR", "message": "Request validation failed", "details": jsonable_encoder(exc.errors()), "request_id": getattr(request.state, "request_id", None)})
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
+    return JSONResponse(status_code=exc.status_code, content={"code": "HTTP_ERROR", "message": redact_secrets(detail), "request_id": getattr(request.state, "request_id", None)}, headers=exc.headers)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logging.getLogger(__name__).exception("unhandled request error", extra={"request_id": getattr(request.state, "request_id", None), "route": request.url.path, "method": request.method})
+    return JSONResponse(status_code=500, content={"code": "INTERNAL_ERROR", "message": "Internal server error", "request_id": getattr(request.state, "request_id", None)})
 
 
 def _fixture_out(db: Session, fixture: Fixture) -> FixtureOut:
@@ -218,7 +266,7 @@ def _fixture_out(db: Session, fixture: Fixture) -> FixtureOut:
 
 @app.get("/health")
 def health() -> dict:
-    diagnostics = {"scheduler_running": bool(scheduler and scheduler.running), "live_poll_enabled": bool(settings.enable_scheduled_ingestion and settings.quota_mode != "free"), "tracked_live_fixtures": None, "stale_live_fixtures": None, "last_successful_live_refresh": None, "providers": []}
+    diagnostics = {"scheduler_running": bool(scheduler and scheduler.running), "live_poll_enabled": bool(settings.enable_scheduled_ingestion and settings.quota_mode != "free" and settings.app_process_role == "worker"), "tracked_live_fixtures": None, "stale_live_fixtures": None, "last_successful_live_refresh": None, "cache": "redis" if cache.available else "memory/degraded", "providers": []}
     try:
         with SessionLocal() as db:
             live_query = select(Fixture).where(Fixture.status.in_(("live", "halftime")))
@@ -230,7 +278,31 @@ def health() -> dict:
         diagnostics["database_diagnostics"] = "unavailable"
     for provider in providers.values():
         diagnostics["providers"].append({"provider": provider.name, "configured": provider.configured, "healthy": provider.configured and provider.last_error is None})
-    return {"status": "ok", "service": "slipiq-api", "time": datetime.now(timezone.utc).isoformat(), "live": diagnostics}
+    return {"status": "ok", "service": "slipiq-api", "version": settings.effective_release, "environment": settings.app_env, "process_role": settings.app_process_role, "time": datetime.now(timezone.utc).isoformat(), "live": diagnostics}
+
+
+@app.get("/livez")
+def livez() -> dict:
+    return {"status": "ok", "service": "slipiq-api", "version": settings.effective_release}
+
+
+@app.get("/ready")
+def ready() -> dict:
+    try:
+        with SessionLocal() as db:
+            db.execute(select(1))
+        if settings.app_env == "production" and settings.redis_required_in_production and not cache.available:
+            raise RuntimeError("redis unavailable")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Service is not ready")
+    return {"status": "ready", "version": settings.effective_release}
+
+
+@app.get("/metrics")
+def metrics_endpoint() -> Response:
+    if not settings.metrics_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+    return Response(content=metrics.prometheus(), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/api/sports")
@@ -336,7 +408,7 @@ def live_backtest(fixture_id: str | None = Query(default=None), limit: int = Que
 
 
 @app.post("/api/live/{fixture_id}/refresh")
-async def refresh_live_fixture(fixture_id: str, db: Session = Depends(get_db)) -> dict:
+async def refresh_live_fixture(fixture_id: str, db: Session = Depends(get_db), _admin: None = Depends(require_admin)) -> dict:
     """Refresh one canonical fixture through its configured provider.
 
     This is deliberately fixture-scoped and quota-accounted.  It never
@@ -457,7 +529,7 @@ def fixture_prediction(fixture_id: str, model_version_id: str | None = Query(def
 
 
 @app.post("/api/predictions/generate/{fixture_id}", response_model=PredictionOut)
-def generate_prediction(fixture_id: str, model_version_id: str | None = Query(default=None), db: Session = Depends(get_db)) -> dict:
+def generate_prediction(fixture_id: str, model_version_id: str | None = Query(default=None), db: Session = Depends(get_db), _admin: None = Depends(require_admin)) -> dict:
     return _prediction_response(db, fixture_id, model_version_id)
 
 
@@ -504,6 +576,7 @@ def build_slips(request: SlipBuildRequest, db: Session = Depends(get_db)) -> dic
         request_data["bookmaker"] = request.bookmaker
     else:
         request_data = request.model_dump()
+    started = time_module.perf_counter()
     result = slip_optimizer.optimize(db, request_data)
     if request.bookmaker:
         result["slips"] = [item for item in result["slips"] if item.get("bookmaker") == request.bookmaker]
@@ -513,6 +586,9 @@ def build_slips(request: SlipBuildRequest, db: Session = Depends(get_db)) -> dic
             result["warnings"] = list(dict.fromkeys(result.get("warnings", []) + ["No eligible selections were available from the requested bookmaker."]))
     if result.get("slips"):
         result = slip_optimizer.persist(db, result, configuration=request_data)
+    metrics.inc("slip_build_total")
+    metrics.inc("slip_optimizer_no_safe_target_total" if result.get("status") == "NO_SAFE_TARGET" else "slip_optimizer_target_reached_total")
+    metrics.observe_http("OPTIMIZER", "/api/slips/build", 200, (time_module.perf_counter() - started) * 1000)
     return result
 
 
@@ -737,7 +813,7 @@ def conflicts(fixture_id: str | None = Query(default=None), db: Session = Depend
 
 
 @app.post("/api/fixtures/{fixture_id}/odds/refresh")
-async def refresh_fixture_odds(fixture_id: str, db: Session = Depends(get_db)) -> dict:
+async def refresh_fixture_odds(fixture_id: str, db: Session = Depends(get_db), _admin: None = Depends(require_admin)) -> dict:
     fixture = db.get(Fixture, fixture_id)
     if fixture is None: raise HTTPException(404, "Fixture not found")
     provider = providers.get(db.scalar(select(Sport.slug).where(Sport.id == fixture.sport_id)))
@@ -754,7 +830,7 @@ async def refresh_fixture_odds(fixture_id: str, db: Session = Depends(get_db)) -
 
 
 @app.post("/api/odds/refresh")
-async def refresh_odds(sport_key: str = Query(..., min_length=2, max_length=80), fixture_id: str | None = Query(default=None), db: Session = Depends(get_db)) -> dict:
+async def refresh_odds(sport_key: str = Query(..., min_length=2, max_length=80), fixture_id: str | None = Query(default=None), db: Session = Depends(get_db), _admin: None = Depends(require_admin)) -> dict:
     if odds_provider is None or not odds_provider.configured:
         raise HTTPException(503, "The Odds API is not configured")
     if fixture_id:
@@ -830,7 +906,7 @@ def provider_usage(db: Session = Depends(get_db)) -> list[ProviderUsageOut]:
 
 
 @app.post("/api/ingestion/today")
-async def ingest_today(sport: str = Query(..., pattern="^(football|basketball)$"), db: Session = Depends(get_db)) -> dict:
+async def ingest_today(sport: str = Query(..., pattern="^(football|basketball)$"), db: Session = Depends(get_db), _admin: None = Depends(require_admin)) -> dict:
     provider = providers[sport]
     date = _app_today().isoformat()
     try:
@@ -843,7 +919,7 @@ async def ingest_today(sport: str = Query(..., pattern="^(football|basketball)$"
 
 
 @app.post("/api/ingestion/live")
-async def ingest_live(sport: str = Query(..., pattern="^(football|basketball)$"), db: Session = Depends(get_db)) -> dict:
+async def ingest_live(sport: str = Query(..., pattern="^(football|basketball)$"), db: Session = Depends(get_db), _admin: None = Depends(require_admin)) -> dict:
     provider = providers[sport]
     try:
         items = await provider.live_fixtures()

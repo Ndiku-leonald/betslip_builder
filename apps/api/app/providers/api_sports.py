@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import random
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any
 
 import httpx
@@ -106,7 +107,7 @@ def normalize_basketball(payload: dict[str, Any]) -> NormalizedFixture:
 
 
 class ApiSportsProvider:
-    def __init__(self, *, name: str, key: str | None, base_url: str, cache: CacheBackend, quota: QuotaManager) -> None:
+    def __init__(self, *, name: str, key: str | None, base_url: str, cache: CacheBackend, quota: QuotaManager, connect_timeout: float = 5.0, read_timeout: float = 15.0, retry_attempts: int = 3, retry_base_seconds: float = 0.5, circuit_failure_threshold: int = 5, circuit_cooldown_seconds: int = 30) -> None:
         self.name, self.key, self.base_url, self.cache, self.quota = name, key, base_url.rstrip("/"), cache, quota
         self.configured = bool(key)
         self.capabilities = {"stats": True, "player_stats": True, "events": name == "api-football", "lineups": name == "api-football"}
@@ -121,6 +122,23 @@ class ApiSportsProvider:
         self.last_quota_blocked = False
         self.request_budget: int | None = None
         self.calls_today = 0
+        self.connect_timeout = connect_timeout
+        self.read_timeout = read_timeout
+        self.retry_attempts = retry_attempts
+        self.retry_base_seconds = retry_base_seconds
+        self.circuit_failure_threshold = circuit_failure_threshold
+        self.circuit_cooldown_seconds = circuit_cooldown_seconds
+        self.consecutive_failures = 0
+        self.circuit_open_until = 0.0
+
+    def _record_failure(self) -> None:
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= self.circuit_failure_threshold:
+            self.circuit_open_until = monotonic() + self.circuit_cooldown_seconds
+
+    def _record_success(self) -> None:
+        self.consecutive_failures = 0
+        self.circuit_open_until = 0.0
 
     def _reset_request_state(self) -> None:
         self.last_cache_hit = False
@@ -146,8 +164,11 @@ class ApiSportsProvider:
             self.last_error = "Provider not configured"
             self.last_status_code = None
             raise ProviderError(self.name, "Provider not configured")
+        if monotonic() < self.circuit_open_until:
+            self.last_error = "Provider circuit is temporarily open"
+            raise ProviderError(self.name, self.last_error, 503)
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        for attempt in range(3):
+        for attempt in range(self.retry_attempts):
             if self.request_budget is not None and self.request_budget <= 0:
                 self.last_error = "Historical request budget reached"
                 self.last_status_code = 429
@@ -167,7 +188,8 @@ class ApiSportsProvider:
             attempt_status: int | None = None
             attempt_remaining: int | None = None
             try:
-                async with httpx.AsyncClient(timeout=15) as client:
+                timeout = httpx.Timeout(self.read_timeout, connect=self.connect_timeout)
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     response = await client.get(url, params=params, headers={"x-apisports-key": self.key or ""})
                 self.last_latency_ms = round((perf_counter() - started) * 1000, 2)
                 self.last_status_code = response.status_code
@@ -179,14 +201,19 @@ class ApiSportsProvider:
                     self.last_error = f"Provider returned HTTP {response.status_code}"
                     self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
                     self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error)
-                    if attempt < 2:
-                        await asyncio.sleep(0.5 * (2**attempt))
+                    if attempt < self.retry_attempts - 1:
+                        retry_after = response.headers.get("retry-after")
+                        delay = self.retry_base_seconds * (2**attempt)
+                        if retry_after and retry_after.isdigit():
+                            delay = max(delay, min(float(retry_after), 30.0))
+                        await asyncio.sleep(delay + random.uniform(0, min(delay * 0.1, 0.25)))
                         continue
                 if response.status_code >= 400:
                     self.last_error = f"Provider returned HTTP {response.status_code}"
                     if response.status_code < 500 and response.status_code != 429:
                         self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
                         self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error)
+                    self._record_failure()
                     raise ProviderError(self.name, f"Provider returned HTTP {response.status_code}", response.status_code)
                 payload = response.json()
                 errors = payload.get("errors") if isinstance(payload, dict) else None
@@ -195,10 +222,12 @@ class ApiSportsProvider:
                     self.last_error = message
                     self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=message)
                     self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=message)
+                    self._record_failure()
                     raise ProviderError(self.name, message, response.status_code)
                 self.last_observed_at = datetime.now(timezone.utc)
                 self.last_success_at = self.last_observed_at
                 self.last_error = None
+                self._record_success()
                 self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining)
                 self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining)
                 return payload
@@ -207,8 +236,10 @@ class ApiSportsProvider:
                 self.last_latency_ms = round((perf_counter() - started) * 1000, 2)
                 self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
                 self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
-                if attempt < 2:
-                    await asyncio.sleep(0.5 * (2**attempt))
+                self._record_failure()
+                if attempt < self.retry_attempts - 1:
+                    delay = self.retry_base_seconds * (2**attempt)
+                    await asyncio.sleep(delay + random.uniform(0, min(delay * 0.1, 0.25)))
                     continue
                 logger.warning("provider request failed provider=%s endpoint=%s", self.name, endpoint)
                 raise ProviderError(self.name, "Provider request failed") from exc

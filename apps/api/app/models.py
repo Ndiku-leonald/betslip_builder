@@ -298,6 +298,7 @@ class OddsSnapshot(TimestampMixin, Base):
     line: Mapped[float | None] = mapped_column(Float, nullable=True)
     decimal_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
     market_status: Mapped[str] = mapped_column(String(30), default="open")
+    is_live: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     settlement_semantics: Mapped[str] = mapped_column(String(60), default="full_game")
     observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     provider_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

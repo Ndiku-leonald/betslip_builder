@@ -9,7 +9,7 @@ from typing import Any
 
 VALID_STATUSES = {"open", "suspended", "closed", "settled", "unavailable", "unknown"}
 VALID_PARTICIPANTS = {"home", "away", "none"}
-VALID_SELECTIONS = {"home", "away", "draw", "over", "under", "yes", "no", "win", "unknown"}
+VALID_SELECTIONS = {"home", "away", "draw", "home_draw", "draw_away", "home_away", "over", "under", "yes", "no", "win", "unknown"}
 
 
 def decimal_odds(value: Any, format: str = "decimal") -> float:
@@ -49,6 +49,7 @@ class NormalizedMarket:
     source_event_id: str | None = None
     participant: str = "none"
     raw: dict[str, Any] | None = None
+    is_live: bool = False
 
     def __post_init__(self):
         if self.status not in VALID_STATUSES: raise ValueError(f"invalid market status: {self.status}")
@@ -70,6 +71,13 @@ def _selection(name: str, family: str, sport: str) -> str:
     if value in {"home", "home team", "1", "team 1"}: return "home"
     if value in {"away", "away team", "2", "team 2"}: return "away"
     if value in {"draw", "x", "tie"}: return "draw"
+    if family == "double_chance":
+        if value in {"1x", "home or draw", "home draw"}: return "home_draw"
+        if value in {"x2", "draw or away", "draw away"}: return "draw_away"
+        if value in {"12", "home or away", "home away"}: return "home_away"
+    if family == "draw_no_bet":
+        if value in {"home", "home team", "1", "team 1"}: return "home"
+        if value in {"away", "away team", "2", "team 2"}: return "away"
     if value in {"yes", "y"}: return "yes"
     if value in {"no", "n"}: return "no"
     if value.startswith("over"): return "over"
@@ -90,7 +98,11 @@ def extract_line(text: Any) -> float | None:
 def normalize_external_market(*, fixture_id: str, sport: str, provider: str, bookmaker: str, market_name: str, selection_name: str, odds: Any, line: float | None = None, odds_format: str = "decimal", period: str = "full_game", participant: str | None = None, settlement_semantics: str | None = None, status: str = "open", observed_at: datetime | None = None, provider_updated_at: datetime | None = None, source_event_id: str | None = None, raw: dict[str, Any] | None = None) -> NormalizedMarket:
     label = " ".join(str(market_name).lower().replace("_", " ").split())
     sport = sport.lower()
-    if any(token in label for token in ("match winner", "full time result", "1x2", "h2h", "moneyline", "winner")):
+    if "draw no bet" in label or "dnb" in label:
+        family, market_type = "draw_no_bet", "draw_no_bet"
+    elif "double chance" in label or label in {"1x", "x2", "12"}:
+        family, market_type = "double_chance", "double_chance"
+    elif any(token in label for token in ("match winner", "full time result", "1x2", "h2h", "moneyline", "winner")):
         family, market_type = (("moneyline", "moneyline") if sport == "basketball" and ("moneyline" in label or "h2h" in label) else ("1x2", "1x2"))
     elif "both" in label or "btts" in label:
         family, market_type = "btts", "btts"

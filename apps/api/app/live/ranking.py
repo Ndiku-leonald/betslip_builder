@@ -15,7 +15,7 @@ def rank_live_markets(values: list[dict], *, profile: str = "balanced") -> list[
         edge = item.get("novig_probability_edge")
         calibration = item.get("calibration_status", "INSUFFICIENT_EVIDENCE")
         gates = {
-            "market_open": status == "CURRENT",
+            "market_open": status == "CURRENT" and item.get("market_status", "unknown") == "open",
             "price_fresh": freshness.get("status") == "CURRENT",
             "probability_available": probability is not None,
             "data_quality": float(item.get("data_quality", 0)) >= settings.live_min_quality * 100,

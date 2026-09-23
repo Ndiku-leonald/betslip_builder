@@ -31,13 +31,18 @@ class Settings(BaseSettings):
     live_data_stale_seconds: int = 120
     live_stats_stale_seconds: int = 180
     live_odds_stale_seconds: int = 30
+    live_refresh_cooldown_seconds: int = 30
+    enable_scheduled_live_odds: bool = True
+    basketball_period_minutes: int = 12
+    basketball_regulation_periods: int = 4
+    basketball_overtime_minutes: int = 5
     live_min_quality: float = 0.45
     live_min_confidence: float = 45.0
     min_provider_agreement: float = 0.8
     betpawa_feed_url: str | None = None
     betpawa_api_key: str | None = None
 
-    @field_validator("live_poll_seconds", "prematch_refresh_minutes", "odds_refresh_seconds", "live_data_stale_seconds", "live_stats_stale_seconds", "live_odds_stale_seconds", "api_football_daily_limit", "api_basketball_daily_limit")
+    @field_validator("live_poll_seconds", "prematch_refresh_minutes", "odds_refresh_seconds", "live_data_stale_seconds", "live_stats_stale_seconds", "live_odds_stale_seconds", "live_refresh_cooldown_seconds", "basketball_period_minutes", "basketball_regulation_periods", "basketball_overtime_minutes", "api_football_daily_limit", "api_basketball_daily_limit")
     @classmethod
     def positive_interval(cls, value: int | None) -> int | None:
         if value is not None and value <= 0:

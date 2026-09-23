@@ -113,19 +113,27 @@ def normalize_football_live_state(payload: Any, *, fixture_id: str | None = None
     fixture, raw = _fixture_input(payload, "football")
     observed = observed_at or fixture.observed_at or datetime.now(timezone.utc)
     updated = provider_updated_at or fixture.provider_updated_at or _parse_dt((raw.get("fixture") or {}).get("update"))
-    minute, stoppage = _clock_minutes(fixture.period or fixture.clock)
+    elapsed = fixture.period
+    extra = None
+    if isinstance(elapsed, dict):
+        extra = elapsed.get("extra")
+        elapsed = elapsed.get("elapsed")
+    clock_value = f"{elapsed}+{extra}" if extra is not None else (fixture.clock or elapsed)
+    minute, stoppage = _clock_minutes(clock_value)
     status = (fixture.status or "unknown").lower()
+    if status == "halftime" and minute is None:
+        minute = 45
     score = raw.get("score", {}) if isinstance(raw.get("score"), dict) else {}
     halftime = score.get("halftime", {}) if isinstance(score.get("halftime"), dict) else {}
     return LiveMatchState(
         fixture_id=str(fixture_id or fixture.provider_fixture_id), sport="football", source_provider=fixture.provider,
         source_event_id=str(fixture.provider_fixture_id), status=status, kickoff_at=fixture.kickoff_at,
         source_timestamp=updated or observed, observed_at=observed, provider_updated_at=updated,
-        period=fixture.period, clock=fixture.clock, minute=minute,
+        period=str(elapsed) if elapsed is not None else fixture.period, clock=fixture.clock, minute=minute,
         stoppage_time=stoppage, home_score=fixture.home_score, away_score=fixture.away_score,
         halftime_home_score=_number(halftime.get("home"), integer=True), halftime_away_score=_number(halftime.get("away"), integer=True),
         statistics=_football_stats(raw, fixture.home_provider_id, fixture.away_provider_id), events=tuple(_event_rows(raw)),
-        auxiliary={"home_name": fixture.home_name, "away_name": fixture.away_name, "competition": fixture.competition_name, "raw": raw},
+        auxiliary={"home_name": fixture.home_name, "away_name": fixture.away_name, "competition": fixture.competition_name, "home_provider_id": fixture.home_provider_id, "away_provider_id": fixture.away_provider_id, "raw": raw},
     )
 
 
@@ -168,7 +176,7 @@ def normalize_basketball_live_state(payload: Any, *, fixture_id: str | None = No
         halftime_home_score=_number(((raw.get("scores") or {}).get("halftime") or {}).get("home"), integer=True) if isinstance(raw.get("scores"), dict) else None,
         halftime_away_score=_number(((raw.get("scores") or {}).get("halftime") or {}).get("away"), integer=True) if isinstance(raw.get("scores"), dict) else None,
         statistics=_basketball_stats(raw, fixture.home_provider_id, fixture.away_provider_id), events=tuple(_event_rows(raw)),
-        auxiliary={"home_name": fixture.home_name, "away_name": fixture.away_name, "competition": fixture.competition_name, "raw": raw},
+        auxiliary={"home_name": fixture.home_name, "away_name": fixture.away_name, "competition": fixture.competition_name, "home_provider_id": fixture.home_provider_id, "away_provider_id": fixture.away_provider_id, "raw": raw},
     )
 
 

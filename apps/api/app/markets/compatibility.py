@@ -13,8 +13,8 @@ def assess_market(market, *, model_settlement: str = "full_game") -> dict:
     """Return an explicit modelability decision before calculating a price."""
     if market.status != "open": return {"status": "UNSUPPORTED", "reason": f"market is {market.status}"}
     if market.settlement_semantics == "regulation" and model_settlement != "regulation": return {"status": "INCOMPATIBLE_SETTLEMENT", "reason": "model and market settle on different periods"}
-    if market.market_family not in {"1x2", "moneyline", "btts", "totals", "game_total", "team_total", "handicap", "spread"}: return {"status": "UNSUPPORTED", "reason": "no Stage Three model mapping"}
-    expected = {"1x2": {"home", "draw", "away"}, "moneyline": {"home", "away"}, "btts": {"yes", "no"}, "totals": {"over", "under"}, "game_total": {"over", "under"}, "team_total": {"over", "under"}, "handicap": {"win"}, "spread": {"win"}}.get(market.market_family, set())
+    if market.market_family not in {"1x2", "draw_no_bet", "double_chance", "moneyline", "btts", "totals", "game_total", "team_total", "handicap", "spread"}: return {"status": "UNSUPPORTED", "reason": "no Stage Three model mapping"}
+    expected = {"1x2": {"home", "draw", "away"}, "draw_no_bet": {"home", "away"}, "double_chance": {"home_draw", "draw_away", "home_away"}, "moneyline": {"home", "away"}, "btts": {"yes", "no"}, "totals": {"over", "under"}, "game_total": {"over", "under"}, "team_total": {"over", "under"}, "handicap": {"win"}, "spread": {"win"}}.get(market.market_family, set())
     if market.selection not in expected: return {"status": "UNSUPPORTED", "reason": "selection is not valid for this market family"}
     if market.line is None and market.market_family in {"totals", "game_total", "team_total", "handicap", "spread"}: return {"status": "UNSUPPORTED", "reason": "a line is required"}
     if market.market_family in {"team_total", "handicap", "spread"} and market.participant not in {"home", "away"}: return {"status": "UNSUPPORTED", "reason": "participant is required"}

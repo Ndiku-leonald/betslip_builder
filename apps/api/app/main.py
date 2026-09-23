@@ -14,7 +14,7 @@ from app.cache import CacheBackend
 from app.config import get_settings
 from app.db import SessionLocal, get_db
 from app.freshness import data_age_seconds
-from app.models import BacktestRun, Competition, Fixture, ModelVersion, OddsSnapshot, Prediction, ProviderConflict, ProviderHealth, ProviderObservation, ProviderUsage, Sport, Team
+from app.models import BacktestRun, Competition, Fixture, LiveMatchSnapshot, ModelVersion, OddsSnapshot, Prediction, ProviderConflict, ProviderHealth, ProviderObservation, ProviderUsage, Sport, Team
 from app.providers.api_sports import ApiSportsProvider, ProviderError, _parse_dt
 from app.providers.easy_soccer_data import EasySoccerDataProvider
 from app.providers.livescore_football import LiveScoreFootballProvider
@@ -31,7 +31,9 @@ from app.quota_store import PersistentQuotaStore
 from app.schemas import DetailOut, FixtureOut, LiveMarketResultOut, LivePredictionOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut
 from app.live.service import LiveIntelligenceService
 from app.live.persistence import latest_live_match_snapshot, persist_live_match_snapshot, state_for_fixture
-from app.live.state import normalize_basketball_live_state, normalize_football_live_state
+from app.live.state import normalize_basketball_live_state, normalize_football_live_state, state_from_fixture
+from app.live.backtest import evaluate_live_backtest
+from app.live.throttle import claim_refresh
 from app.prediction.service import PredictionService, PredictionUnavailable
 from app.services.ingestion import ingest_fixtures
 
@@ -132,7 +134,25 @@ async def _scheduled_live(sport: str) -> None:
         items = await provider.live_fixtures()
         with SessionLocal() as db:
             ingest_fixtures(db, items)
-            for fixture in db.scalars(select(Fixture).where(Fixture.provider == provider.name, Fixture.status.in_(("live", "halftime")))):
+            live_fixtures = list(db.scalars(select(Fixture).where(Fixture.provider == provider.name, Fixture.status.in_(("live", "halftime")))))
+            for fixture in live_fixtures:
+                # Capture the exact canonical state returned by this poll before
+                # odds and prediction work begins. The prediction row links to
+                # this immutable snapshot, never to an older mutable fixture.
+                persist_live_match_snapshot(db, state_from_fixture(fixture, sport, observed_at=fixture.observed_at))
+            if settings.enable_scheduled_live_odds and api_sports_odds[sport].configured:
+                odds_adapter = api_sports_odds[sport]
+                for fixture in live_fixtures:
+                    try:
+                        markets_found = await odds_adapter.markets_for_fixture(fixture.provider_fixture_id, sport)
+                        for market in markets_found:
+                            object.__setattr__(market, "fixture_id", fixture.id)
+                            object.__setattr__(market, "is_live", True)
+                        if markets_found:
+                            persist_market_snapshots(db, markets_found)
+                    except ProviderError as exc:
+                        logging.getLogger(__name__).warning("live odds refresh failed fixture=%s: %s", fixture.id, exc)
+            for fixture in live_fixtures:
                 try:
                     live_service.prediction(db, fixture.id)
                 except Exception:
@@ -195,7 +215,19 @@ def _fixture_out(db: Session, fixture: Fixture) -> FixtureOut:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "service": "slipiq-api", "time": datetime.now(timezone.utc).isoformat()}
+    diagnostics = {"scheduler_running": bool(scheduler and scheduler.running), "live_poll_enabled": bool(settings.enable_scheduled_ingestion and settings.quota_mode != "free"), "tracked_live_fixtures": None, "stale_live_fixtures": None, "last_successful_live_refresh": None, "providers": []}
+    try:
+        with SessionLocal() as db:
+            live_query = select(Fixture).where(Fixture.status.in_(("live", "halftime")))
+            live_rows = list(db.scalars(live_query))
+            diagnostics["tracked_live_fixtures"] = len(live_rows)
+            diagnostics["stale_live_fixtures"] = sum(1 for item in live_rows if str(item.freshness).upper() == "STALE")
+            diagnostics["last_successful_live_refresh"] = db.scalar(select(func.max(LiveMatchSnapshot.ingested_at)))
+    except Exception:
+        diagnostics["database_diagnostics"] = "unavailable"
+    for provider in providers.values():
+        diagnostics["providers"].append({"provider": provider.name, "configured": provider.configured, "healthy": provider.last_error is None})
+    return {"status": "ok", "service": "slipiq-api", "time": datetime.now(timezone.utc).isoformat(), "live": diagnostics}
 
 
 @app.get("/api/sports")
@@ -295,6 +327,11 @@ def live_history(fixture_id: str, limit: int = Query(default=500, ge=1, le=5000)
     return live_service.history(db, fixture_id, limit)
 
 
+@app.get("/api/live/backtest")
+def live_backtest(fixture_id: str | None = Query(default=None), limit: int = Query(default=5000, ge=1, le=20000), db: Session = Depends(get_db)) -> dict:
+    return evaluate_live_backtest(db, fixture_id=fixture_id, limit=limit)
+
+
 @app.post("/api/live/{fixture_id}/refresh")
 async def refresh_live_fixture(fixture_id: str, db: Session = Depends(get_db)) -> dict:
     """Refresh one canonical fixture through its configured provider.
@@ -309,6 +346,9 @@ async def refresh_live_fixture(fixture_id: str, db: Session = Depends(get_db)) -
     provider = providers.get(sport)
     if provider is None or not provider.configured:
         raise HTTPException(503, "Provider not configured")
+    claimed, _ = claim_refresh(cache, provider.name, fixture_id, settings.live_refresh_cooldown_seconds)
+    if not claimed:
+        raise HTTPException(429, "Live refresh throttled; retry after the cooldown window.")
     try:
         payload = await provider.fixture_details(fixture.provider_fixture_id)
     except ProviderError as exc:
@@ -443,7 +483,7 @@ def backtests(db: Session = Depends(get_db)) -> list[dict]:
 
 
 def _market_out(item: OddsSnapshot) -> dict:
-    return {"id": item.id, "fixture_id": item.fixture_id, "provider": item.provider, "bookmaker": item.bookmaker, "source_event_id": item.source_event_id, "market_family": item.market_family, "market_type": item.market_type, "period": item.period, "participant": item.participant, "selection": item.selection, "line": item.line, "decimal_odds": item.decimal_odds, "status": item.market_status, "settlement_semantics": item.settlement_semantics, "observed_at": item.observed_at, "provider_updated_at": item.provider_updated_at}
+    return {"id": item.id, "fixture_id": item.fixture_id, "provider": item.provider, "bookmaker": item.bookmaker, "source_event_id": item.source_event_id, "market_family": item.market_family, "market_type": item.market_type, "period": item.period, "participant": item.participant, "selection": item.selection, "line": item.line, "decimal_odds": item.decimal_odds, "status": item.market_status, "is_live": item.is_live, "settlement_semantics": item.settlement_semantics, "observed_at": item.observed_at, "provider_updated_at": item.provider_updated_at}
 
 
 def _market_key(market: OddsSnapshot) -> str | None:
@@ -629,7 +669,9 @@ async def refresh_fixture_odds(fixture_id: str, db: Session = Depends(get_db)) -
     if provider is None or not provider.configured: raise HTTPException(503, "Odds provider not configured")
     try:
         markets_found = await api_sports_odds[db.scalar(select(Sport.slug).where(Sport.id == fixture.sport_id))].markets_for_fixture(fixture.provider_fixture_id, db.scalar(select(Sport.slug).where(Sport.id == fixture.sport_id)))
-        for market in markets_found: object.__setattr__(market, "fixture_id", fixture.id)
+        for market in markets_found:
+            object.__setattr__(market, "fixture_id", fixture.id)
+            object.__setattr__(market, "is_live", fixture.status in {"live", "halftime"})
         _record_usage(provider, "odds", status_code=200)
         return {"fixture_id": fixture.id, "stored": persist_market_snapshots(db, markets_found), "provider": provider.name}
     except ProviderError as exc:

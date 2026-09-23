@@ -59,6 +59,8 @@ def market_freshness(observed_at, *, provider_updated_at=None, now=None, ttl_sec
 
 def _outcome_contract(market):
     if market.market_family == "1x2": return {"home", "draw", "away"}
+    if market.market_family == "draw_no_bet": return {"home", "away"}
+    if market.market_family == "double_chance": return {"home_draw", "draw_away", "home_away"}
     if market.market_family == "moneyline": return {"home", "away"}
     if market.market_family == "btts": return {"yes", "no"}
     if market.market_family in {"totals", "game_total", "team_total"}: return {"over", "under"}
@@ -119,7 +121,7 @@ class MarketValueService:
             "market_family": market.market_family, "market_type": market.market_type, "participant": market.participant, "selection": market.selection, "line": market.line,
             "bookmaker_odds": market.decimal_odds, "model_probability": win, "model_win_probability": win, "model_push_probability": push, "model_loss_probability": loss,
             "model_resolved_win_probability": resolved, "fair_odds": None, "raw_implied_probability": None, "no_vig_probability": None,
-            "no_vig_status": no_vig_status, "overround": None, "raw_probability_edge": None, "novig_probability_edge": None, "expected_value": None,
+            "no_vig_status": no_vig_status, "overround": None, "raw_probability_edge": None, "novig_probability_edge": None, "expected_value": None, "market_status": market_status,
             "confidence": confidence, "data_quality": data_quality, "market_reliability": market_reliability, "market_reliability_components": market_reliability_components or {},
             "source_reliability": source_reliability, "source_reliability_components": source_reliability_components or {}, "provider_agreement": provider_agreement,
             "material_provider_conflict": material_conflict, "calibration_status": structure.get("calibration_status", calibration_status), "freshness": freshness, "status": status,

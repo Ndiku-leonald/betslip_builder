@@ -32,9 +32,9 @@ def evaluate_live_data_quality(state: LiveMatchState, *, now: datetime | None = 
     warnings = []
     if state_age is None: warnings.append("Match-state timestamp unavailable.")
     elif not state_fresh: warnings.append("Live data too stale for a reliable market evaluation.")
-    if state.statistics and not stats_fresh: warnings.append("Live statistics are stale.")
+    if state.statistics and not stats_fresh: warnings.append("Live statistics are stale and will be ignored by the live model.")
     if not pre_match_available: warnings.append("No valid pre-match prediction; live model uses a lower-confidence baseline.")
-    return {"overall": round(score, 4), "status": quality_status, "state_age_seconds": state_age, "statistics_age_seconds": stats_age, "state_fresh": state_fresh, "statistics_fresh": stats_fresh, "provider_reliability": provider_reliability, "source_agreement": source_agreement, "missing_core_fields": missing_core, "clock_valid": clock_valid, "warnings": warnings}
+    return {"overall": round(score, 4), "status": quality_status, "state_age_seconds": state_age, "statistics_age_seconds": stats_age, "state_fresh": state_fresh, "statistics_fresh": stats_fresh, "statistics_used": bool(state.statistics) and stats_fresh, "provider_reliability": provider_reliability, "source_agreement": source_agreement, "missing_core_fields": missing_core, "clock_valid": clock_valid, "warnings": warnings}
 
 
 def live_recommendation_gate(quality: dict, *, odds_available: bool = True, odds_fresh: bool = True) -> tuple[bool, str | None]:

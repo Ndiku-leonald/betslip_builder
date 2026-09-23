@@ -1,9 +1,10 @@
 "use client";
 
+import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-const links = [{ href: "/", label: "Dashboard", icon: "D" }, { href: "/live", label: "Live", icon: "L" }, { href: "/fixtures", label: "Fixtures", icon: "F" }, { href: "/value", label: "Value Finder", icon: "V" }, { href: "/sources", label: "Data sources", icon: "S" }];
+const links = [{ href: "/", label: "Dashboard", icon: "D" }, { href: "/builder", label: "Slip builder", icon: "B" }, { href: "/live", label: "Live", icon: "L" }, { href: "/fixtures", label: "Fixtures", icon: "F" }, { href: "/value", label: "Value Finder", icon: "V" }, { href: "/sources", label: "Data sources", icon: "S" }];
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();

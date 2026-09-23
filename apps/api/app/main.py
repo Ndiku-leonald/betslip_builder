@@ -7,14 +7,14 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.cache import CacheBackend
 from app.config import get_settings
 from app.db import SessionLocal, get_db
 from app.freshness import data_age_seconds
-from app.models import BacktestRun, Competition, Fixture, LiveMatchSnapshot, ModelVersion, OddsSnapshot, Prediction, ProviderConflict, ProviderHealth, ProviderObservation, ProviderUsage, Sport, Team
+from app.models import BacktestRun, Competition, Fixture, LiveMatchSnapshot, ModelVersion, OddsSnapshot, Prediction, ProviderConflict, ProviderHealth, ProviderObservation, ProviderUsage, Slip, SlipLeg, Sport, Team
 from app.providers.api_sports import ApiSportsProvider, ProviderError, _parse_dt
 from app.providers.easy_soccer_data import EasySoccerDataProvider
 from app.providers.livescore_football import LiveScoreFootballProvider
@@ -28,7 +28,7 @@ from app.odds.ontology import NormalizedMarket
 from app.providers.reliability import source_reliability, SOURCE_ROLES
 from app.quota import QuotaManager
 from app.quota_store import PersistentQuotaStore
-from app.schemas import DetailOut, FixtureOut, LiveMarketResultOut, LivePredictionOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut
+from app.schemas import DetailOut, FixtureOut, LiveMarketResultOut, LivePredictionOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut, SlipBuildOut, SlipBuildRequest
 from app.live.service import LiveIntelligenceService
 from app.live.persistence import latest_live_match_snapshot, persist_live_match_snapshot, state_for_fixture
 from app.live.state import normalize_basketball_live_state, normalize_football_live_state, state_from_fixture
@@ -36,6 +36,8 @@ from app.live.backtest import evaluate_live_backtest
 from app.live.throttle import claim_refresh
 from app.prediction.service import PredictionService, PredictionUnavailable
 from app.services.ingestion import ingest_fixtures
+from app.slips.config import PROFILE_CONFIG
+from app.slips.optimizer import SlipOptimizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 settings = get_settings()
@@ -55,6 +57,7 @@ scheduler: AsyncIOScheduler | None = None
 app_timezone = ZoneInfo(settings.app_timezone)
 prediction_service = PredictionService()
 live_service = LiveIntelligenceService()
+slip_optimizer = SlipOptimizer()
 
 
 def _app_today() -> date:
@@ -480,6 +483,78 @@ def model(model_id: str, db: Session = Depends(get_db)) -> ModelVersion:
 @app.get("/api/backtests")
 def backtests(db: Session = Depends(get_db)) -> list[dict]:
     return [{"id": item.id, "sport": item.sport, "model_version_id": item.model_version_id, "sample_count": item.sample_count, "metrics": item.metrics, "start_at": item.start_at, "end_at": item.end_at} for item in db.scalars(select(BacktestRun).order_by(BacktestRun.created_at.desc()))]
+
+
+def _slip_response(db: Session, slip: Slip) -> dict:
+    legs = [item.snapshot for item in db.scalars(select(SlipLeg).where(SlipLeg.slip_id == slip.id).order_by(SlipLeg.leg_order, SlipLeg.id))]
+    return {"id": slip.id, "target_odds": slip.target_odds, "combined_odds": slip.achieved_odds or 1.0, "target_difference": (slip.achieved_odds or 1.0) - (slip.target_odds or 0), "profile": slip.profile or slip.risk, "mode": slip.mode, "bookmaker": slip.bookmaker, "provider": slip.provider, "optimization_version": slip.optimization_version, "legs": legs, "naive_joint_probability": slip.joint_probability or 0, "risk_adjusted_probability": slip.adjusted_score or 0, "correlation_risk": slip.correlation_risk or "LOW", "target_reached": slip.target_reached, "warnings": slip.warnings or [], "configuration_snapshot": slip.configuration_snapshot or {}, "diagnostics": slip.diagnostics or []}
+
+
+@app.post("/api/slips/build", response_model=SlipBuildOut)
+def build_slips(request: SlipBuildRequest, db: Session = Depends(get_db)) -> dict:
+    """Build research-mode recommendations from current canonical Stage Three/Four intelligence.
+
+    This endpoint never places a bet and never weakens a data-quality or freshness gate
+    to force a target odd.
+    """
+    if request.bookmaker:
+        # The optimizer already enforces one bookmaker per option; this early guard
+        # simply makes the requested scope explicit without changing market data.
+        request_data = request.model_dump()
+        request_data["bookmaker"] = request.bookmaker
+    else:
+        request_data = request.model_dump()
+    result = slip_optimizer.optimize(db, request_data)
+    if request.bookmaker:
+        result["slips"] = [item for item in result["slips"] if item.get("bookmaker") == request.bookmaker]
+        if not result["slips"]:
+            result["target_reached"] = False
+            result["status"] = "NO_SAFE_TARGET"
+            result["warnings"] = list(dict.fromkeys(result.get("warnings", []) + ["No eligible selections were available from the requested bookmaker."]))
+    if result.get("slips"):
+        result = slip_optimizer.persist(db, result, configuration=request_data)
+    return result
+
+
+@app.get("/api/slips/history")
+def slip_history(limit: int = Query(default=50, ge=1, le=200), db: Session = Depends(get_db)) -> list[dict]:
+    return [_slip_response(db, item) for item in db.scalars(select(Slip).order_by(Slip.created_at.desc()).limit(limit))]
+
+
+@app.get("/api/slips/{slip_id}/explain")
+def explain_slip(slip_id: str, db: Session = Depends(get_db)) -> dict:
+    slip = db.get(Slip, slip_id)
+    if slip is None: raise HTTPException(404, "Slip not found")
+    result = _slip_response(db, slip)
+    result["explanation"] = "This is a statistical estimate. Odds may change and selections can lose; no outcome or profit is guaranteed."
+    return result
+
+
+@app.get("/api/slips/{slip_id}")
+def get_slip(slip_id: str, db: Session = Depends(get_db)) -> dict:
+    slip = db.get(Slip, slip_id)
+    if slip is None: raise HTTPException(404, "Slip not found")
+    return _slip_response(db, slip)
+
+
+@app.delete("/api/slips/{slip_id}/legs/{leg_id}")
+def remove_slip_leg(slip_id: str, leg_id: str, db: Session = Depends(get_db)) -> dict:
+    slip = db.get(Slip, slip_id)
+    leg = db.get(SlipLeg, leg_id)
+    if slip is None or leg is None or leg.slip_id != slip_id: raise HTTPException(404, "Slip or leg not found")
+    db.execute(delete(SlipLeg).where(SlipLeg.id == leg_id))
+    remaining = [item.snapshot for item in db.scalars(select(SlipLeg).where(SlipLeg.slip_id == slip.id).order_by(SlipLeg.leg_order, SlipLeg.id))]
+    config = slip.configuration_snapshot or {}
+    profile = PROFILE_CONFIG.get(slip.profile, PROFILE_CONFIG["balanced"])
+    recalculated = slip_optimizer.recalculate_option(remaining, float(slip.target_odds or 1), float(config.get("target_tolerance", .10)), profile) if remaining else {"combined_odds": 1.0, "naive_joint_probability": 0.0, "risk_adjusted_probability": 0.0, "correlation_risk": "LOW", "target_reached": False}
+    slip.achieved_odds = recalculated.get("combined_odds", 1.0)
+    slip.joint_probability = recalculated.get("naive_joint_probability", 0.0)
+    slip.adjusted_score = recalculated.get("risk_adjusted_probability", 0.0)
+    slip.correlation_risk = recalculated.get("correlation_risk", "LOW")
+    slip.target_reached = bool(recalculated.get("target_reached", False))
+    slip.warnings = list(dict.fromkeys((slip.warnings or []) + ["A leg was removed locally; odds and probabilities were recalculated from the stored snapshot."]))
+    db.commit()
+    return _slip_response(db, slip)
 
 
 def _market_out(item: OddsSnapshot) -> dict:

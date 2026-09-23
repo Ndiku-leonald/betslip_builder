@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class FixtureOut(BaseModel):
@@ -125,3 +125,94 @@ class ModelVersionOut(BaseModel):
     metrics: dict = {}
     sample_count: int | None = None
     status: str
+
+
+class SlipBuildRequest(BaseModel):
+    sports: list[Literal["football", "basketball"]] = ["football", "basketball"]
+    start_date: date | None = None
+    end_date: date | None = None
+    mode: Literal["prematch", "live", "both"] = "prematch"
+    target_odds: float
+    profile: Literal["conservative", "balanced", "aggressive"] = "balanced"
+    min_confidence: float = 0
+    min_data_quality: float = 0
+    max_legs: int = 6
+    min_legs: int = 2
+    min_probability: float = 0
+    max_individual_odds: float = 100
+    target_tolerance: float = .10
+    include_live: bool = False
+    competitions: list[str] = []
+    bookmaker: str | None = None
+    correlation_policy: Literal["avoid_same_fixture", "allow_with_penalty"] = "avoid_same_fixture"
+    require_positive_value: bool = False
+    alternatives: int = 3
+
+    @model_validator(mode="after")
+    def validate_bounds(self):
+        if self.target_odds <= 1 or self.target_odds > 1000: raise ValueError("target_odds must be greater than 1 and at most 1000")
+        if self.min_legs < 1 or self.max_legs < self.min_legs or self.max_legs > 12: raise ValueError("leg limits must satisfy 1 <= min_legs <= max_legs <= 12")
+        if not 0 <= self.min_confidence <= 100 or not 0 <= self.min_data_quality <= 100: raise ValueError("confidence and data-quality thresholds must be between 0 and 100")
+        if not 0 < self.target_tolerance <= .5: raise ValueError("target_tolerance must be between 0 and 0.5")
+        if not 0 < self.max_individual_odds <= 100: raise ValueError("max_individual_odds must be between 1 and 100")
+        if not 0 <= self.min_probability < 1: raise ValueError("min_probability must be between 0 and 1")
+        if self.start_date and self.end_date and self.end_date < self.start_date: raise ValueError("end_date cannot precede start_date")
+        if self.start_date and self.end_date and (self.end_date - self.start_date).days > 31: raise ValueError("date window cannot exceed 31 days")
+        if self.mode == "live" and not self.include_live: raise ValueError("include_live must be true in live mode")
+        if not self.sports: raise ValueError("at least one sport is required")
+        return self
+
+
+class SlipLegOut(BaseModel):
+    id: str | None = None
+    fixture_id: str
+    sport: str
+    competition: str | None = None
+    home: str
+    away: str
+    kickoff_at: datetime | None = None
+    status: str
+    market_family: str
+    market_type: str
+    participant: str
+    selection: str
+    line: float | None = None
+    bookmaker_odds: float
+    model_probability: float
+    model_push_probability: float = 0
+    fair_odds: float | None = None
+    expected_value: float | None = None
+    confidence: float = 0
+    data_quality: float = 0
+    explanation: str
+    warnings: list[str] = []
+
+
+class SlipOut(BaseModel):
+    id: str | None = None
+    target_odds: float
+    combined_odds: float
+    target_difference: float
+    profile: str
+    mode: str
+    bookmaker: str | None = None
+    provider: str | None = None
+    legs: list[dict] = []
+    naive_joint_probability: float
+    risk_adjusted_probability: float
+    correlation_risk: str
+    target_reached: bool
+    warnings: list[str] = []
+
+
+class SlipBuildOut(BaseModel):
+    status: str
+    message: str
+    target_odds: float
+    profile: str
+    mode: str
+    target_reached: bool
+    slips: list[dict] = []
+    diagnostics: dict = {}
+    exclusions: list[dict] = []
+    warnings: list[str] = []

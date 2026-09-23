@@ -1,6 +1,6 @@
 # SlipIQ
 
-SlipIQ is a production-oriented sports data and statistical modeling foundation for football and basketball analytics. Stage Two adds historical, leakage-safe probability models and model review surfaces. Stage Three adds normalized market intelligence and price-gap analysis. It does not optimize slips, place bets, or present fabricated selections.
+SlipIQ is a production-oriented sports data and statistical modeling foundation for football and basketball analytics. Stage Two adds historical, leakage-safe probability models and model review surfaces. Stage Three adds normalized market intelligence and price-gap analysis. Stage Five adds a bounded, auditable target-odds betslip builder that uses those estimates without placing bets or presenting fabricated certainty.
 
 ## Stage One, Two, Three, and Four status
 

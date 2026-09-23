@@ -15,11 +15,19 @@ export type LiveFixture = Fixture & { data_quality: { overall?: number; status?:
 export type LivePrediction = { available: boolean; fixture_id: string; sport?: string; state: Record<string, unknown>; pre_match_prediction: Record<string, number>; live_prediction: Record<string, number>; probability_delta: Record<string, number>; model_version?: string | null; model?: string; confidence?: number; data_quality: Record<string, unknown>; calibration_status?: string; warnings: string[]; reason?: string };
 export type LiveMarketsResult = { fixture_id: string; values: MarketValue[]; opportunities: MarketValue[]; warnings: string[]; prediction?: LivePrediction; odds_consensus?: OddsConsensus[]; reason?: string };
 export type ModelVersion = { id: string; name: string; version: string; sport?: string; algorithm?: string; trained_at?: string; feature_version?: string; metrics: Record<string, number>; sample_count?: number; status: string };
+export type SlipLeg = { id?: string; fixture_id: string; sport: string; competition?: string | null; home: string; away: string; kickoff_at?: string | null; status: "PRE_MATCH" | "LIVE"; market_family: string; market_type: string; participant: string; selection: string; line: number | null; bookmaker_odds: number; model_probability: number; model_push_probability?: number; fair_odds?: number | null; expected_value?: number | null; confidence: number; data_quality: number; explanation: string; warnings?: string[] };
+export type SlipOption = { id?: string | null; target_odds: number; combined_odds: number; target_difference: number; profile: string; mode: string; bookmaker: string | null; provider: string | null; legs: SlipLeg[]; naive_joint_probability: number; all_legs_win_probability?: number; no_loss_probability_with_push?: number; push_affected_probability?: number; risk_adjusted_probability: number; correlation_risk: string; target_reached: boolean; warnings: string[] };
+export type SlipBuildResult = { status: "TARGET_REACHED" | "NO_SAFE_TARGET"; message: string; target_odds: number; profile: string; mode: string; target_reached: boolean; slips: SlipOption[]; diagnostics: Record<string, unknown>; exclusions: Array<Record<string, unknown>>; warnings: string[] };
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 async function request<T>(path: string): Promise<T> {
   const response = await fetch(`${API}${path}`, { cache: "no-store" });
   if (!response.ok) throw new Error(`API request failed (${response.status})`);
+  return response.json() as Promise<T>;
+}
+async function mutate<T>(path: string, method: "POST" | "DELETE", body?: unknown): Promise<T> {
+  const response = await fetch(API + path, { method, cache: "no-store", headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
+  if (!response.ok) throw new Error("API request failed (" + response.status + ")");
   return response.json() as Promise<T>;
 }
 export const api = {
@@ -40,4 +48,7 @@ export const api = {
   opportunities: (profile = "balanced") => request<MarketValue[]>(`/api/opportunities?profile=${profile}`),
   movement: (id: string) => request<Record<string, unknown>[]>(`/api/odds/movement?fixture_id=${encodeURIComponent(id)}`),
   sources: () => request<Record<string, unknown>[]>("/api/data-sources"),
+  buildSlip: (body: Record<string, unknown>) => mutate<SlipBuildResult>("/api/slips/build", "POST", body),
+  slip: (id: string) => request<SlipOption>("/api/slips/" + encodeURIComponent(id)),
+  removeSlipLeg: (slipId: string, legId: string) => mutate<SlipOption>("/api/slips/" + encodeURIComponent(slipId) + "/legs/" + encodeURIComponent(legId), "DELETE"),
 };

@@ -500,10 +500,27 @@ class Slip(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     risk: Mapped[str] = mapped_column(String(30))
     target_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mode: Mapped[str] = mapped_column(String(20), default="prematch")
+    profile: Mapped[str] = mapped_column(String(20), default="balanced")
+    bookmaker: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    achieved_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    optimization_version: Mapped[str] = mapped_column(String(80), default="stage-five-v1")
+    joint_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adjusted_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    correlation_risk: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    target_reached: Mapped[bool] = mapped_column(Boolean, default=False)
+    configuration_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
+    diagnostics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class SlipLeg(Base):
     __tablename__ = "slip_legs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     slip_id: Mapped[str] = mapped_column(ForeignKey("slips.id"), index=True)
-    market_selection_id: Mapped[str] = mapped_column(ForeignKey("market_selections.id"))
+    market_selection_id: Mapped[str | None] = mapped_column(ForeignKey("market_selections.id"), nullable=True)
+    odds_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("odds_snapshots.id"), nullable=True, index=True)
+    fixture_id: Mapped[str | None] = mapped_column(ForeignKey("fixtures.id"), nullable=True, index=True)
+    leg_order: Mapped[int] = mapped_column(Integer, default=0)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

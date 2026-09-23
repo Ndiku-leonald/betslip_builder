@@ -118,7 +118,8 @@ class MarketValueService:
         if status == "CURRENT" and structure.get("calibration_status", calibration_status) in {"insufficient_calibration", "insufficient_model"}: status = "INSUFFICIENT_CALIBRATION"
         result = {
             "fixture_id": market.fixture_id, "sport": getattr(market, "sport", "football"), "bookmaker": market.bookmaker, "provider": market.provider,
-            "market_family": market.market_family, "market_type": market.market_type, "participant": market.participant, "selection": market.selection, "line": market.line,
+            "market_family": market.market_family, "market_type": market.market_type, "period": getattr(market, "period", "full_game"), "participant": market.participant, "selection": market.selection, "line": market.line,
+            "settlement_semantics": getattr(market, "settlement_semantics", "full_game"), "is_live": bool(getattr(market, "is_live", False)),
             "bookmaker_odds": market.decimal_odds, "model_probability": win, "model_win_probability": win, "model_push_probability": push, "model_loss_probability": loss,
             "model_resolved_win_probability": resolved, "fair_odds": None, "raw_implied_probability": None, "no_vig_probability": None,
             "no_vig_status": no_vig_status, "overround": None, "raw_probability_edge": None, "novig_probability_edge": None, "expected_value": None, "market_status": market_status,

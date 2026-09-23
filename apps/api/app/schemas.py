@@ -86,6 +86,34 @@ class PredictionOut(BaseModel):
     reason: str | None = None
 
 
+class LivePredictionOut(BaseModel):
+    available: bool
+    fixture_id: str
+    sport: str | None = None
+    state: dict = {}
+    pre_match_prediction: dict = {}
+    live_prediction: dict = {}
+    probability_delta: dict = {}
+    model_version: str | None = None
+    model: str | None = None
+    confidence: float | None = None
+    data_quality: dict = {}
+    calibration_status: str | None = None
+    warnings: list[str] = []
+    market_intelligence: dict | None = None
+    reason: str | None = None
+
+
+class LiveMarketResultOut(BaseModel):
+    fixture_id: str
+    values: list[dict] = []
+    opportunities: list[dict] = []
+    warnings: list[str] = []
+    prediction: dict | None = None
+    odds_consensus: list[dict] = []
+    reason: str | None = None
+
+
 class ModelVersionOut(BaseModel):
     id: str
     name: str

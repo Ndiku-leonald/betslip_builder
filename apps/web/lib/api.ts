@@ -11,6 +11,9 @@ export type MarketValue = { fixture_id: string; sport: string; bookmaker: string
 export type ProviderConsensus = { fixture_id: string; primary: { provider: string; status: string; home: string; away: string; observed_at?: string | null }; secondary: { provider: string; status: string; reason?: string; observed_at?: string | null }; consensus: { agreement: number; source_count: number; conflicts: Array<{ field: string; severity: string; primary_value: unknown; secondary_value: unknown }>; material_conflict?: boolean }; agreement: number; conflicts: Array<{ field: string; severity: string; primary_value: unknown; secondary_value: unknown }>; material_conflict: boolean; ranking_suppressed: boolean };
 export type OddsConsensus = { provider: string; fixture_id: string; market_family: string; market_type: string; period: string; participant: string; selection: string; line: number | null; settlement_semantics: string; bookmaker_count: number; best_current_price: number; median_current_price: number; median_raw_implied_probability: number; bookmakers: string[] };
 export type MarketValuesResult = { fixture_id: string; values: MarketValue[]; opportunities: MarketValue[]; consensus: ProviderConsensus; odds_consensus?: OddsConsensus[] };
+export type LiveFixture = Fixture & { data_quality: { overall?: number; status?: string; state_age_seconds?: number | null; statistics_age_seconds?: number | null }; pre_match_probability: Record<string, number>; live_probability: Record<string, number>; probability_delta: Record<string, number>; confidence: number | null; calibration_status: string | null; warnings: string[] };
+export type LivePrediction = { available: boolean; fixture_id: string; sport?: string; state: Record<string, unknown>; pre_match_prediction: Record<string, number>; live_prediction: Record<string, number>; probability_delta: Record<string, number>; model_version?: string | null; model?: string; confidence?: number; data_quality: Record<string, unknown>; calibration_status?: string; warnings: string[]; reason?: string };
+export type LiveMarketsResult = { fixture_id: string; values: MarketValue[]; opportunities: MarketValue[]; warnings: string[]; prediction?: LivePrediction; odds_consensus?: OddsConsensus[]; reason?: string };
 export type ModelVersion = { id: string; name: string; version: string; sport?: string; algorithm?: string; trained_at?: string; feature_version?: string; metrics: Record<string, number>; sample_count?: number; status: string };
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -21,6 +24,11 @@ async function request<T>(path: string): Promise<T> {
 }
 export const api = {
   fixtures: (path = "/api/fixtures/today") => request<Fixture[]>(path),
+  live: (sport: "football" | "basketball") => request<LiveFixture[]>(`/api/live?sport=${sport}`),
+  liveDetail: (id: string) => request<{ fixture: Fixture; prediction: LivePrediction }>(`/api/live/${encodeURIComponent(id)}`),
+  livePrediction: (id: string) => request<LivePrediction>(`/api/live/${encodeURIComponent(id)}/prediction`),
+  liveMarkets: (id: string) => request<LiveMarketsResult>(`/api/live/${encodeURIComponent(id)}/markets`),
+  liveHistory: (id: string) => request<Record<string, unknown>[]>(`/api/live/${encodeURIComponent(id)}/history`),
   fixture: (id: string) => request<Fixture>(`/api/fixtures/${encodeURIComponent(id)}`),
   detail: (id: string, kind: "stats" | "events" | "lineups" | "player-stats") => request<FixtureDetail>(`/api/fixtures/${encodeURIComponent(id)}/${kind}`),
   prediction: (id: string) => request<Prediction>(`/api/fixtures/${encodeURIComponent(id)}/prediction`),

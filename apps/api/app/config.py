@@ -28,15 +28,34 @@ class Settings(BaseSettings):
     enable_odds_api: bool = False
     odds_prematch_ttl_seconds: int = 1800
     odds_live_ttl_seconds: int = 30
+    live_data_stale_seconds: int = 120
+    live_stats_stale_seconds: int = 180
+    live_odds_stale_seconds: int = 30
+    live_min_quality: float = 0.45
+    live_min_confidence: float = 45.0
     min_provider_agreement: float = 0.8
     betpawa_feed_url: str | None = None
     betpawa_api_key: str | None = None
 
-    @field_validator("live_poll_seconds", "prematch_refresh_minutes", "odds_refresh_seconds", "api_football_daily_limit", "api_basketball_daily_limit")
+    @field_validator("live_poll_seconds", "prematch_refresh_minutes", "odds_refresh_seconds", "live_data_stale_seconds", "live_stats_stale_seconds", "live_odds_stale_seconds", "api_football_daily_limit", "api_basketball_daily_limit")
     @classmethod
     def positive_interval(cls, value: int | None) -> int | None:
         if value is not None and value <= 0:
             raise ValueError("intervals must be positive")
+        return value
+
+    @field_validator("live_min_quality")
+    @classmethod
+    def quality_range(cls, value: float) -> float:
+        if not 0 <= value <= 1:
+            raise ValueError("live_min_quality must be between 0 and 1")
+        return value
+
+    @field_validator("live_min_confidence")
+    @classmethod
+    def confidence_range(cls, value: float) -> float:
+        if not 0 <= value <= 100:
+            raise ValueError("live_min_confidence must be between 0 and 100")
         return value
 
     @property

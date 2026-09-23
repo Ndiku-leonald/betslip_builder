@@ -2,7 +2,7 @@
 
 SlipIQ is a production-oriented sports data and statistical modeling foundation for football and basketball analytics. Stage Two adds historical, leakage-safe probability models and model review surfaces. Stage Three adds normalized market intelligence and price-gap analysis. It does not optimize slips, place bets, or present fabricated selections.
 
-## Stage One, Two, and Three status
+## Stage One, Two, Three, and Four status
 
 - FastAPI backend with SQLAlchemy/Alembic and SQLite or PostgreSQL.
 - API-Sports adapters for API-Football and API-Basketball.
@@ -14,6 +14,7 @@ SlipIQ is a production-oriented sports data and statistical modeling foundation 
 - Evaluation splits are atomic by exact observation timestamp; same-kickoff fixtures remain in one partition. Candidate and fold-local baseline metrics use identical held-out fixture IDs, including a true league-average Poisson baseline.
 - Normalized odds ontology, immutable odds snapshots, documented odds-provider adapters, explicit settlement compatibility, no-vig pricing, expected value, freshness gates, and risk-profile ranking.
 - Market intelligence APIs and frontend surfaces for fixture markets, value opportunities, odds movement, provider status, and conflict visibility. Stage Three does not construct accumulators or place bets.
+- Stage Four live/in-play intelligence: canonical football and basketball live state, immutable live match and posterior snapshots, explicit state/statistics/odds freshness, pre-match-to-live probability deltas, live market gates/ranking, `/api/live` APIs, and a dedicated responsive `/live` board/detail experience.
 
 ## Architecture
 
@@ -110,6 +111,15 @@ APScheduler is process-local. It is suitable for development and a single-worker
 4. Treat secondary football sources as verification context. They do not overwrite primary canonical fixture data, and conflicts remain observable through `/api/conflicts`.
 
 The Stage Three API does not scrape bookmaker sites, bypass anti-bot controls, infer missing prices, or claim that a positive edge is guaranteed.
+
+## Stage Four live-intelligence workflow
+
+1. The live provider refresh updates the canonical fixture and appends a `live_match_snapshots` observation; it never overwrites the historical live record.
+2. The live model retrieves the latest valid Stage Two `pre_match` prediction, updates it with current match evidence, and persists `live_prediction_snapshots` with explicit probability deltas.
+3. Current odds are evaluated through the Stage Three normalized odds/value architecture. Missing/stale/suspended/closed prices cannot create a recommendation, and incomplete market groups are not no-vig normalized.
+4. `/live` and `/live/{fixture_id}` show current score/clock, data quality, freshness, pre-match versus live probability, confidence, calibration limits, markets, warnings, and chronological history.
+
+See [docs/live-intelligence.md](docs/live-intelligence.md) for thresholds, model methodology, scheduler/quota behavior, and production limitations. The deterministic synthetic football/basketball pipeline is validation only and is not evidence of real-world predictive accuracy.
 
 ## Real data limitations
 

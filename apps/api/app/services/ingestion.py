@@ -5,6 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.freshness import classify_freshness
+from app.live.persistence import persist_live_match_snapshot
+from app.live.state import normalize_basketball_live_state, normalize_football_live_state
 from app.models import Competition, Country, Fixture, ProviderEntityMapping, Sport, Team
 from app.providers.base import NormalizedFixture
 
@@ -66,5 +68,8 @@ def ingest_fixtures(db: Session, items: list[NormalizedFixture]) -> int:
             for key, value in values.items():
                 setattr(fixture, key, value)
         _mapping(db, item.provider, "fixture", item.provider_fixture_id, fixture.id)
+        if item.status in {"live", "halftime"}:
+            state = normalize_football_live_state(item, fixture_id=fixture.id) if item.sport == "football" else normalize_basketball_live_state(item, fixture_id=fixture.id)
+            persist_live_match_snapshot(db, state)
     db.commit()
     return len(items)

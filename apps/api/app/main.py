@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -27,7 +28,10 @@ from app.odds.ontology import NormalizedMarket
 from app.providers.reliability import source_reliability, SOURCE_ROLES
 from app.quota import QuotaManager
 from app.quota_store import PersistentQuotaStore
-from app.schemas import DetailOut, FixtureOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut
+from app.schemas import DetailOut, FixtureOut, LiveMarketResultOut, LivePredictionOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut
+from app.live.service import LiveIntelligenceService
+from app.live.persistence import latest_live_match_snapshot, persist_live_match_snapshot, state_for_fixture
+from app.live.state import normalize_basketball_live_state, normalize_football_live_state
 from app.prediction.service import PredictionService, PredictionUnavailable
 from app.services.ingestion import ingest_fixtures
 
@@ -48,6 +52,7 @@ market_value_service = MarketValueService()
 scheduler: AsyncIOScheduler | None = None
 app_timezone = ZoneInfo(settings.app_timezone)
 prediction_service = PredictionService()
+live_service = LiveIntelligenceService()
 
 
 def _app_today() -> date:
@@ -127,6 +132,11 @@ async def _scheduled_live(sport: str) -> None:
         items = await provider.live_fixtures()
         with SessionLocal() as db:
             ingest_fixtures(db, items)
+            for fixture in db.scalars(select(Fixture).where(Fixture.provider == provider.name, Fixture.status.in_(("live", "halftime")))):
+                try:
+                    live_service.prediction(db, fixture.id)
+                except Exception:
+                    logging.getLogger(__name__).warning("live prediction refresh failed fixture=%s", fixture.id, exc_info=True)
         _record_usage(provider, "scheduled/live", status_code=200)
     except ProviderError as exc:
         _record_usage(provider, "scheduled/live", status_code=exc.status_code, error=str(exc))
@@ -233,6 +243,86 @@ def fixtures_live(sport: str | None = Query(default=None), limit: int = Query(de
     return _fixtures(db, sport=sport, status=("live", "halftime"), limit=limit)
 
 
+def _live_fixture_out(db: Session, item: Fixture) -> dict:
+    base = _fixture_out(db, item).model_dump()
+    try:
+        prediction = live_service.prediction(db, item.id)
+    except LookupError:
+        prediction = {"available": False, "fixture_id": item.id, "warnings": ["Live model unavailable for this competition."]}
+    base.update({"data_quality": prediction.get("data_quality", {}), "pre_match_probability": prediction.get("pre_match_prediction", {}), "live_probability": prediction.get("live_prediction", {}), "probability_delta": prediction.get("probability_delta", {}), "confidence": prediction.get("confidence"), "calibration_status": prediction.get("calibration_status"), "warnings": prediction.get("warnings", [])})
+    return base
+
+
+@app.get("/api/live")
+def live_board(sport: str | None = Query(default=None, pattern="^(football|basketball)$"), limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db)) -> list[dict]:
+    query = select(Fixture).join(Sport, Sport.id == Fixture.sport_id).where(Fixture.status.in_(("live", "halftime"))).order_by(Fixture.kickoff_at).limit(limit)
+    if sport:
+        query = query.where(Sport.slug == sport)
+    return [_live_fixture_out(db, item) for item in db.scalars(query)]
+
+
+@app.get("/api/live/{fixture_id}")
+def live_detail(fixture_id: str, db: Session = Depends(get_db)) -> dict:
+    fixture = db.get(Fixture, fixture_id)
+    if fixture is None:
+        raise HTTPException(404, "Fixture not found")
+    prediction = live_service.prediction(db, fixture_id)
+    markets = live_service.markets(db, fixture_id)
+    prediction["market_intelligence"] = {"opportunities": markets.get("opportunities", []), "warnings": markets.get("warnings", [])}
+    return {"fixture": _fixture_out(db, fixture), "prediction": prediction, "markets": markets}
+
+
+@app.get("/api/live/{fixture_id}/prediction", response_model=LivePredictionOut)
+def live_prediction(fixture_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return live_service.prediction(db, fixture_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/live/{fixture_id}/markets", response_model=LiveMarketResultOut)
+def live_markets(fixture_id: str, profile: str = Query(default="balanced", pattern="^(conservative|balanced|aggressive)$"), db: Session = Depends(get_db)) -> dict:
+    try:
+        return live_service.markets(db, fixture_id, profile=profile)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/live/{fixture_id}/history")
+def live_history(fixture_id: str, limit: int = Query(default=500, ge=1, le=5000), db: Session = Depends(get_db)) -> list[dict]:
+    if db.get(Fixture, fixture_id) is None:
+        raise HTTPException(404, "Fixture not found")
+    return live_service.history(db, fixture_id, limit)
+
+
+@app.post("/api/live/{fixture_id}/refresh")
+async def refresh_live_fixture(fixture_id: str, db: Session = Depends(get_db)) -> dict:
+    """Refresh one canonical fixture through its configured provider.
+
+    This is deliberately fixture-scoped and quota-accounted.  It never
+    fabricates a state when the provider is unavailable.
+    """
+    fixture = db.get(Fixture, fixture_id)
+    if fixture is None:
+        raise HTTPException(404, "Fixture not found")
+    sport = db.scalar(select(Sport.slug).where(Sport.id == fixture.sport_id))
+    provider = providers.get(sport)
+    if provider is None or not provider.configured:
+        raise HTTPException(503, "Provider not configured")
+    try:
+        payload = await provider.fixture_details(fixture.provider_fixture_id)
+    except ProviderError as exc:
+        _record_usage(provider, f"live/{fixture.provider_fixture_id}", status_code=exc.status_code, error=str(exc))
+        raise HTTPException(503, str(exc)) from exc
+    _record_usage(provider, f"live/{fixture.provider_fixture_id}", status_code=200)
+    response = payload.get("response", []) if isinstance(payload, dict) else []
+    item = response[0] if response else payload
+    state = normalize_football_live_state(item, fixture_id=fixture.id, observed_at=provider.last_observed_at) if sport == "football" else normalize_basketball_live_state(item, fixture_id=fixture.id, observed_at=provider.last_observed_at)
+    persist_live_match_snapshot(db, state)
+    db.commit()
+    return {"fixture_id": fixture.id, "provider": provider.name, "status": state.status, "observed_at": state.observed_at, "snapshot_id": latest_live_match_snapshot(db, fixture.id).id if latest_live_match_snapshot(db, fixture.id) else None}
+
+
 @app.get("/api/games/basketball", response_model=list[FixtureOut])
 def basketball_games(limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db)) -> list[FixtureOut]:
     return _fixtures(db, sport="basketball", limit=limit)
@@ -275,6 +365,16 @@ async def _detail(fixture_id: str, kind: str, db: Session, response_key: str | N
             data = response[0].get(response_key or kind) if isinstance(response[0], dict) else response
         if data is None:
             return DetailOut(fixture_id=fixture_id, provider=item.provider, available=False, availability="not_covered", data=None, stale=False, message="Not available from current provider")
+        if item.status in {"live", "halftime"} and kind in {"stats", "events", "lineups"}:
+            current = state_for_fixture(db, item, sport_slug)
+            if sport_slug == "football":
+                current = normalize_football_live_state(response[0], fixture_id=item.id, observed_at=provider.last_observed_at)
+            elif kind == "stats":
+                current = replace(current, statistics={"provider_payload": data}, auxiliary={**current.auxiliary, "stats_observed_at": (provider.last_observed_at or datetime.now(timezone.utc)).isoformat()})
+            if kind == "events":
+                current = replace(current, events=tuple(data if isinstance(data, list) else []))
+            persist_live_match_snapshot(db, current)
+            db.commit()
         return DetailOut(fixture_id=fixture_id, provider=item.provider, available=True, availability="available", data=data, stale=False, message=None)
     except ProviderError as exc:
         _record_usage(provider, f"details/{item.provider_fixture_id}", status_code=exc.status_code, error=str(exc))

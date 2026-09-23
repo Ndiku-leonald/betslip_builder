@@ -151,6 +151,90 @@ class MatchStatSnapshot(TimestampMixin, Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class LiveMatchSnapshot(Base):
+    """Immutable canonical state observed during a match.
+
+    The live tables intentionally do not use ``TimestampMixin``.  A live
+    observation is an audit record, not a mutable resource; corrections are
+    represented by a later observation.
+    """
+
+    __tablename__ = "live_match_snapshots"
+    __table_args__ = (
+        UniqueConstraint("fixture_id", "source_provider", "observed_at", name="uq_live_match_observation"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    fixture_id: Mapped[str] = mapped_column(ForeignKey("fixtures.id"), index=True)
+    source_provider: Mapped[str] = mapped_column(String(60), index=True)
+    source_event_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    period: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    clock: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stoppage_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    halftime_home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    halftime_away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    statistics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    events: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    auxiliary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    data_quality: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class LivePredictionSnapshot(Base):
+    """Immutable posterior produced from one live match observation."""
+
+    __tablename__ = "live_prediction_snapshots"
+    __table_args__ = (UniqueConstraint("fixture_id", "observed_at", name="uq_live_prediction_observation"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    fixture_id: Mapped[str] = mapped_column(ForeignKey("fixtures.id"), index=True)
+    live_match_snapshot_id: Mapped[str] = mapped_column(ForeignKey("live_match_snapshots.id"), index=True)
+    pre_match_prediction_id: Mapped[str | None] = mapped_column(ForeignKey("predictions.id"), nullable=True, index=True)
+    model_version_id: Mapped[str | None] = mapped_column(ForeignKey("model_versions.id"), nullable=True, index=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    model_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    pre_match_probability: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    live_probability: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    probability_delta: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    markets: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    data_quality: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    calibration_status: Mapped[str] = mapped_column(String(40), default="INSUFFICIENT_EVIDENCE")
+    warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
+class LiveMarketSnapshot(Base):
+    """Immutable audit record for live market evaluation."""
+
+    __tablename__ = "live_market_snapshots"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    fixture_id: Mapped[str] = mapped_column(ForeignKey("fixtures.id"), index=True)
+    live_prediction_snapshot_id: Mapped[str] = mapped_column(ForeignKey("live_prediction_snapshots.id"), index=True)
+    odds_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("odds_snapshots.id"), nullable=True, index=True)
+    provider: Mapped[str] = mapped_column(String(60), index=True)
+    bookmaker: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    market_family: Mapped[str] = mapped_column(String(60), index=True)
+    market_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    participant: Mapped[str] = mapped_column(String(20), default="none")
+    selection: Mapped[str] = mapped_column(String(120))
+    line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decimal_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_status: Mapped[str] = mapped_column(String(30), default="unknown", index=True)
+    odds_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    model_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    push_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    suitability: Mapped[str] = mapped_column(String(40), default="not_eligible")
+    value_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class Lineup(TimestampMixin, Base):
     __tablename__ = "lineups"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

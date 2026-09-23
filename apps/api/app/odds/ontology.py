@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 
-VALID_STATUSES = {"open", "suspended", "closed", "settled", "unavailable"}
+VALID_STATUSES = {"open", "suspended", "closed", "settled", "unavailable", "unknown"}
 VALID_PARTICIPANTS = {"home", "away", "none"}
 VALID_SELECTIONS = {"home", "away", "draw", "over", "under", "yes", "no", "win", "unknown"}
 

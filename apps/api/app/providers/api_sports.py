@@ -76,6 +76,7 @@ def normalize_football(payload: dict[str, Any]) -> NormalizedFixture:
         status=normalize_status("football", status.get("short"), status.get("long")),
         status_detail=status.get("long"), home_score=goals.get("home"), away_score=goals.get("away"),
         period=status.get("elapsed"), clock=f"{status.get('elapsed')}'" if status.get("elapsed") is not None else None,
+        provider_updated_at=_parse_dt(item.get("update")),
         raw=payload,
     )
 
@@ -100,7 +101,7 @@ def normalize_basketball(payload: dict[str, Any]) -> NormalizedFixture:
         status=normalize_status("basketball", status.get("short"), status.get("long")),
         status_detail=status.get("long") or status.get("short"), home_score=home_score, away_score=away_score,
         period=str(status.get("period")) if status.get("period") is not None else None,
-        clock=status.get("clock"), raw=payload,
+        clock=status.get("clock"), raw=payload, provider_updated_at=_parse_dt(item.get("update")),
     )
 
 
@@ -229,7 +230,10 @@ class ApiSportsProvider:
             return cached
         payload = await self._request("fixtures" if self.name == "api-football" else "games", params)
         normalizer = normalize_football if self.name == "api-football" else normalize_basketball
-        fixtures = [replace(normalizer(item), observed_at=self.last_observed_at, provider_updated_at=None) for item in payload.get("response", [])]
+        fixtures = []
+        for item in payload.get("response", []):
+            normalized = normalizer(item)
+            fixtures.append(replace(normalized, observed_at=self.last_observed_at, provider_updated_at=normalized.provider_updated_at))
         self.cache.set(cache_key, [self._to_cache(item) for item in fixtures], ttl)
         return fixtures
 

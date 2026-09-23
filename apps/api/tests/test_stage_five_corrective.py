@@ -1,3 +1,4 @@
+import math
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -189,7 +190,10 @@ def test_api_build_retrieval_explain_history_and_leg_removal_use_persisted_snaps
         assert client.get("/api/slips/history").status_code == 200
         removed = client.delete(f"/api/slips/{slip_id}/legs/{leg_id}")
         assert removed.status_code == 200 and len(removed.json()["legs"]) == len(slip["legs"]) - 1
-        assert removed.json()["combined_odds"] == pytest.approx(removed.json()["legs"][0]["bookmaker_odds"])
+        assert removed.json()["combined_odds"] == pytest.approx(math.prod(leg["bookmaker_odds"] for leg in removed.json()["legs"]))
+        for remaining_leg in list(removed.json()["legs"]):
+            final = client.delete(f"/api/slips/{slip_id}/legs/{remaining_leg['id']}")
+        assert final.status_code == 200 and final.json()["legs"] == [] and final.json()["combined_odds"] == 1.0
         assert client.get("/api/slips/not-found").status_code == 404
         assert client.get("/api/slips/not-found/explain").status_code == 404
         assert client.delete(f"/api/slips/{slip_id}/legs/not-found").status_code == 404

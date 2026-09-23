@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.live.service import LiveIntelligenceService
 from app.markets.storage import latest_market_snapshots
-from app.markets.value import MarketValueService, market_group_key
+from app.markets.value import MarketValueService, market_freshness, market_group_key
 from app.models import Competition, Fixture, OddsSnapshot, Prediction, Slip, SlipLeg, Sport, Team
 from app.odds.ontology import NormalizedMarket
 from app.providers.reliability import source_reliability
@@ -50,7 +50,7 @@ def _date_bounds(request: dict[str, Any]) -> tuple[datetime, datetime]:
 
 
 def _candidate_identity(item: dict) -> tuple:
-    return (item.get("fixture_id"), item.get("bookmaker"), item.get("market_family"), item.get("market_type"), item.get("period"), item.get("participant"), item.get("selection"), item.get("line"), item.get("settlement_semantics"))
+    return (item.get("fixture_id"), item.get("provider"), item.get("bookmaker"), item.get("market_family"), item.get("market_type"), item.get("period"), item.get("participant"), item.get("selection"), item.get("line"), item.get("settlement_semantics"))
 
 
 def _warning_list(value: Any) -> list[str]:
@@ -112,6 +112,31 @@ class SlipOptimizer:
         self.value_service = value_service or MarketValueService()
         self.live_service = live_service or LiveIntelligenceService()
 
+    @staticmethod
+    def _latest_valid_prematch_prediction(db: Session, fixture_id: str) -> Prediction | None:
+        predictions = db.scalars(select(Prediction).where(Prediction.fixture_id == fixture_id, Prediction.prediction_type == "pre_match").order_by(Prediction.generated_at.desc(), Prediction.id.desc())).all()
+        for prediction in predictions:
+            payload = prediction.payload or {}
+            if payload.get("available", True) is not False:
+                return prediction
+        return None
+
+    @staticmethod
+    def _prematch_snapshots(db: Session, fixture_id: str) -> list[OddsSnapshot]:
+        rows = list(db.scalars(select(OddsSnapshot).where(OddsSnapshot.fixture_id == fixture_id, OddsSnapshot.is_live.is_(False)).order_by(OddsSnapshot.observed_at.desc(), OddsSnapshot.created_at.desc(), OddsSnapshot.id.desc())))
+        selected: dict[tuple, OddsSnapshot] = {}
+        for row in rows:
+            key = _candidate_identity({"fixture_id": row.fixture_id, "provider": row.provider, "bookmaker": row.bookmaker, "market_family": row.market_family, "market_type": row.market_type, "period": row.period, "participant": row.participant, "selection": row.selection, "line": row.line, "settlement_semantics": row.settlement_semantics})
+            current = selected.get(key)
+            if current is None:
+                selected[key] = row
+                continue
+            current_fresh = market_freshness(current.observed_at or current.created_at, provider_updated_at=current.provider_updated_at)
+            row_fresh = market_freshness(row.observed_at or row.created_at, provider_updated_at=row.provider_updated_at)
+            if (row.market_status == "open", row_fresh.get("status") == "CURRENT", row.observed_at or row.created_at, row.id) > (current.market_status == "open", current_fresh.get("status") == "CURRENT", current.observed_at or current.created_at, current.id):
+                selected[key] = row
+        return sorted(selected.values(), key=lambda item: (item.observed_at or item.created_at, item.id), reverse=True)
+
     def _prematch_values(self, db: Session, fixture: Fixture, snapshots: list[OddsSnapshot], prediction: Prediction | None) -> list[dict]:
         # These are the same Stage Three helpers used by the market-value endpoints.
         from app.main import _model_market_reliability, _model_probability_for_snapshot, _stored_consensus
@@ -138,7 +163,7 @@ class SlipOptimizer:
         sports = set(params.get("sports") or {"football", "basketball"})
         mode = params.get("mode", "prematch")
         include_live = bool(params.get("include_live", False)) and mode in {"live", "both"}
-        diagnostics = {"candidates_discovered": 0, "candidates_rejected": 0, "candidates_entering_optimizer": 0, "rejection_reasons": {}, "bookmaker_groups": 0}
+        diagnostics = {"candidates_discovered": 0, "candidates_rejected": 0, "candidates_entering_optimizer": 0, "rejection_reasons": {}, "bookmaker_groups": 0, "pruning_count": 0}
         exclusions: list[dict] = []
         candidates: list[dict] = []
         query = select(Fixture).join(Sport, Sport.id == Fixture.sport_id).where(Sport.slug.in_(sports)).order_by(Fixture.kickoff_at, Fixture.id)
@@ -156,14 +181,14 @@ class SlipOptimizer:
                 requested_competitions = set(params["competitions"])
                 competition_for_filter = db.get(Competition, fixture.competition_id) if fixture.competition_id else None
                 if fixture.competition_id not in requested_competitions and (competition_for_filter is None or competition_for_filter.name not in requested_competitions): continue
-            prediction = db.scalar(select(Prediction).where(Prediction.fixture_id == fixture.id).order_by(Prediction.generated_at.desc()).limit(1))
-            snapshots = latest_market_snapshots(db, fixture.id, live_only=is_live_fixture)
+            prediction = None if is_live_fixture else self._latest_valid_prematch_prediction(db, fixture.id)
+            snapshots = latest_market_snapshots(db, fixture.id, live_only=is_live_fixture) if is_live_fixture else self._prematch_snapshots(db, fixture.id)
             if not is_live_fixture: snapshots = [item for item in snapshots if not item.is_live]
             if not snapshots: continue
             if is_live_fixture:
                 live_result = self.live_service.markets(db, fixture.id, profile=profile_name, persist=False)
                 values = live_result.get("opportunities", [])
-                lookup = {_candidate_identity({**item, "snapshot_id": snapshot.id}): snapshot for snapshot in snapshots for item in [{"fixture_id": snapshot.fixture_id, "bookmaker": snapshot.bookmaker, "market_family": snapshot.market_family, "market_type": snapshot.market_type, "period": snapshot.period, "participant": snapshot.participant, "selection": snapshot.selection, "line": snapshot.line, "settlement_semantics": snapshot.settlement_semantics}]}
+                lookup = {_candidate_identity({**item, "snapshot_id": snapshot.id}): snapshot for snapshot in snapshots for item in [{"fixture_id": snapshot.fixture_id, "provider": snapshot.provider, "bookmaker": snapshot.bookmaker, "market_family": snapshot.market_family, "market_type": snapshot.market_type, "period": snapshot.period, "participant": snapshot.participant, "selection": snapshot.selection, "line": snapshot.line, "settlement_semantics": snapshot.settlement_semantics}]}
                 for value in values:
                     match = lookup.get(_candidate_identity(value))
                     value["snapshot_id"] = match.id if match else None
@@ -186,7 +211,7 @@ class SlipOptimizer:
                     if len(exclusions) < 100: exclusions.append({"fixture_id": fixture.id, "selection": value.get("selection"), "reasons": reasons})
                     continue
                 probability = float(value.get("model_win_probability", value.get("model_probability")))
-                candidate = {**value, "fixture_id": fixture.id, "sport": sport.slug if sport else value.get("sport", "unknown"), "competition": competition.name if competition else None, "competition_id": fixture.competition_id, "kickoff_at": kickoff, "status": "LIVE" if is_live_fixture else "PRE_MATCH", "home": home.name if home else "Unknown", "away": away.name if away else "Unknown", "team_ids": [fixture.home_team_id, fixture.away_team_id], "team_names": [home.name if home else "Unknown", away.name if away else "Unknown"], "model_probability": probability, "push_probability": float(value.get("model_push_probability", 0) or 0), "loss_probability": float(value.get("model_loss_probability", max(0, 1 - probability - float(value.get("model_push_probability", 0) or 0))) or 0), "warnings": _warning_list(value.get("warnings")), "settlement_semantics": value.get("settlement_semantics", "full_game"), "why_selected": "The model probability, current price, quality, reliability and calibration passed the configured profile gates."}
+                candidate = {**value, "fixture_id": fixture.id, "sport": sport.slug if sport else value.get("sport", "unknown"), "competition": competition.name if competition else None, "competition_id": fixture.competition_id, "kickoff_at": kickoff, "status": "LIVE" if is_live_fixture else "PRE_MATCH", "home": home.name if home else "Unknown", "away": away.name if away else "Unknown", "team_ids": [fixture.home_team_id, fixture.away_team_id], "team_names": [home.name if home else "Unknown", away.name if away else "Unknown"], "model_probability": probability, "push_probability": float(value.get("model_push_probability", 0) or 0), "loss_probability": float(value.get("model_loss_probability", max(0, 1 - probability - float(value.get("model_push_probability", 0) or 0))) or 0), "warnings": _warning_list(value.get("warnings")), "settlement_semantics": value.get("settlement_semantics", "full_game"), "odds_snapshot_id": value.get("snapshot_id"), "prediction_id": prediction.id if prediction else None, "prediction_reference": prediction.model_version_id if prediction else None, "why_selected": "The model probability, current price, quality, reliability and calibration passed the configured profile gates."}
                 candidates.append(candidate)
         dedup: dict[tuple, dict] = {}
         for item in candidates:
@@ -232,8 +257,13 @@ class SlipOptimizer:
         by_fixture: dict[str, list[dict]] = {}
         for item in items: by_fixture.setdefault(item["fixture_id"], []).append(item)
         pruned = []
-        for fixture_items in by_fixture.values(): pruned.extend(sorted(fixture_items, key=self._leg_quality, reverse=True)[:MAX_CANDIDATES_PER_FIXTURE])
-        pruned = sorted(pruned, key=self._leg_quality, reverse=True)[:MAX_CANDIDATES_PER_GROUP]
+        for fixture_items in by_fixture.values():
+            ordered = sorted(fixture_items, key=self._leg_quality, reverse=True)
+            self._pruning_count += max(0, len(ordered) - MAX_CANDIDATES_PER_FIXTURE)
+            pruned.extend(ordered[:MAX_CANDIDATES_PER_FIXTURE])
+        ordered = sorted(pruned, key=self._leg_quality, reverse=True)
+        self._pruning_count += max(0, len(ordered) - MAX_CANDIDATES_PER_GROUP)
+        pruned = ordered[:MAX_CANDIDATES_PER_GROUP]
         beam: list[list[dict]] = [[]]
         explored = 0
         states: list[list[dict]] = []
@@ -242,14 +272,21 @@ class SlipOptimizer:
             for state in beam:
                 for item in pruned:
                     explored += 1
-                    if item in state or any(existing["fixture_id"] == item["fixture_id"] for existing in state): continue
-                    if state and any(classify_correlation(existing, item)["risk"] == CorrelationRisk.CONFLICTING.value for existing in state): continue
+                    if item in state or any(existing["fixture_id"] == item["fixture_id"] for existing in state):
+                        self._pruning_count += 1
+                        continue
+                    if state and any(classify_correlation(existing, item)["risk"] == CorrelationRisk.CONFLICTING.value for existing in state):
+                        self._pruning_count += 1
+                        continue
                     new_state = state + [item]
                     metrics = self._state_metrics(new_state, target, config, tolerance)
-                    if metrics["combined_odds"] > target * (1 + tolerance) * 1.75: continue
+                    if metrics["combined_odds"] > target * (1 + tolerance) * 1.75:
+                        self._pruning_count += 1
+                        continue
                     next_beam.append(new_state)
                     if len(new_state) >= min_legs: states.append(new_state)
             next_beam.sort(key=lambda state: self._state_metrics(state, target, config, tolerance)["suitability_score"], reverse=True)
+            self._pruning_count += max(0, len(next_beam) - MAX_BEAM_WIDTH)
             beam = next_beam[:MAX_BEAM_WIDTH]
             if not beam: break
         ranked = []
@@ -260,7 +297,7 @@ class SlipOptimizer:
         return sorted(ranked, key=lambda item: (-item["suitability_score"], abs(item["target_difference"]), item["combined_odds"], tuple(leg["fixture_id"] for leg in item["legs"])))
 
     def optimize(self, db: Session, request: Any) -> dict:
-        started = time.perf_counter(); self._combinations_explored = 0; params = _as_dict(request); pool = self.candidate_pool(db, params); config = PROFILE_CONFIG[params["profile"]]
+        started = time.perf_counter(); self._combinations_explored = 0; self._pruning_count = 0; params = _as_dict(request); pool = self.candidate_pool(db, params); config = PROFILE_CONFIG[params["profile"]]
         groups: dict[tuple[str, str], list[dict]] = {}
         for item in pool.candidates: groups.setdefault((item["provider"], item["bookmaker"]), []).append(item)
         ranked: list[dict] = []
@@ -268,10 +305,10 @@ class SlipOptimizer:
         ranked.sort(key=lambda item: (-item["suitability_score"], abs(item["target_difference"]), item["combined_odds"]))
         alternatives = []
         for item in ranked:
-            if not alternatives or any(len({leg["fixture_id"] for leg in item["legs"]}.symmetric_difference({leg["fixture_id"] for leg in other["legs"]})) >= 2 for other in alternatives):
+            if not alternatives or all(len({leg["fixture_id"] for leg in item["legs"]}.symmetric_difference({leg["fixture_id"] for leg in other["legs"]})) >= 2 for other in alternatives):
                 alternatives.append(item)
             if len(alternatives) >= int(params.get("alternatives", 3)): break
-        diagnostics = {**pool.diagnostics, "bookmaker_groups": len(groups), "combinations_explored": self._combinations_explored, "elapsed_ms": round((time.perf_counter() - started) * 1000, 2), "search_limit": {"beam_width": MAX_BEAM_WIDTH, "max_candidates_per_group": MAX_CANDIDATES_PER_GROUP}}
+        diagnostics = {**pool.diagnostics, "bookmaker_groups": len(groups), "combinations_explored": self._combinations_explored, "pruning_count": self._pruning_count, "elapsed_ms": round((time.perf_counter() - started) * 1000, 2), "diversity_rule": "fixture symmetric difference >= 2", "search_limit": {"beam_width": MAX_BEAM_WIDTH, "max_candidates_per_fixture": MAX_CANDIDATES_PER_FIXTURE, "max_candidates_per_group": MAX_CANDIDATES_PER_GROUP, "max_legs": params["max_legs"]}}
         safe = bool(alternatives and alternatives[0]["target_reached"])
         warnings = [] if safe else ["No eligible slip reached the requested target under the current risk constraints."]
         if not groups: warnings.append("No single-bookmaker group contained enough eligible selections.")
@@ -292,7 +329,8 @@ class SlipOptimizer:
             slip = Slip(risk=option["profile"], target_odds=option["target_odds"], mode=option["mode"], profile=option["profile"], bookmaker=option.get("bookmaker"), provider=option.get("provider"), achieved_odds=option.get("combined_odds"), optimization_version=self.version, joint_probability=option.get("naive_joint_probability"), adjusted_score=option.get("risk_adjusted_probability"), correlation_risk=option.get("correlation_risk"), target_reached=option.get("target_reached", False), configuration_snapshot=_json_safe(configuration), warnings=option.get("warnings", []), diagnostics=_json_safe(result.get("diagnostics", {})))
             db.add(slip); db.flush()
             for index, leg in enumerate(option["legs"]):
-                db.add(SlipLeg(slip_id=slip.id, odds_snapshot_id=leg.get("snapshot_id"), fixture_id=leg.get("fixture_id"), leg_order=index, snapshot=_json_safe(leg)))
+                row = SlipLeg(slip_id=slip.id, odds_snapshot_id=leg.get("odds_snapshot_id") or leg.get("snapshot_id"), fixture_id=leg.get("fixture_id"), leg_order=index, snapshot=_json_safe(leg))
+                db.add(row); db.flush(); leg["id"] = row.id; row.snapshot = _json_safe(leg)
             option["id"] = slip.id
             persisted.append(option)
         db.commit(); result["slips"] = persisted; result["slip_id"] = persisted[0]["id"]

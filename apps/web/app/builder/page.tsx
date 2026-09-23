@@ -18,7 +18,12 @@ export default function BuilderPage() {
 
   async function build(event: FormEvent) {
     event.preventDefault(); setLoading(true); setError(null);
-    try { setResult(await api.buildSlip(form)); }
+    try {
+      const payload: Record<string, unknown> = { ...form };
+      if (!payload.start_date) delete payload.start_date;
+      if (!payload.end_date) delete payload.end_date;
+      setResult(await api.buildSlip(payload));
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : "The builder service is unavailable."); }
     finally { setLoading(false); }
   }

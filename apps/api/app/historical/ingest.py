@@ -110,3 +110,16 @@ async def ingest_range(db: Session, provider: ApiSportsProvider, start: date, en
         cursor = date.fromordinal(cursor.toordinal() + 1)
     provider.request_budget = None
     return {"dates": (cursor - start).days, "fixtures": fixtures_count, "statistics": stats_count, "logical_operations": logical_operations, "external_requests": external_requests, "cache_hits": cache_hits}
+
+
+async def ingest_league_season(db: Session, provider: ApiSportsProvider, league: str, season: str) -> dict[str, int | str]:
+    """Ingest one explicitly selected football league-season without stats."""
+    items = await provider.football_fixtures_by_league_season(league, season)
+    saved = ingest_fixtures(db, items)
+    return {
+        "league": str(league),
+        "season": str(season),
+        "fixtures": saved,
+        "finished": sum(item.status == "finished" for item in items),
+        "statistics": 0,
+    }

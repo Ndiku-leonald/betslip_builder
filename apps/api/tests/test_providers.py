@@ -180,3 +180,18 @@ async def test_football_data_v4_normalizes_timezone_and_uses_auth_header(monkeyp
     assert calls[0][0].endswith("/matches")
     assert calls[0][2] == {"X-Auth-Token": "configured"}
     assert provider.last_rate_limit_remaining == 9
+
+
+@pytest.mark.asyncio
+async def test_api_football_league_season_uses_explicit_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = ApiSportsProvider(name="api-football", key="key", base_url="https://example.test", cache=MemoryCache(), quota=QuotaManager(mode="standard"))
+    captured = {}
+
+    async def fake_fixtures(params):
+        captured.update(params)
+        return []
+
+    monkeypatch.setattr(provider, "_fixtures", fake_fixtures)
+    fixtures = await provider.football_fixtures_by_league_season("39", "2024")
+    assert fixtures == []
+    assert captured == {"league": "39", "season": "2024"}

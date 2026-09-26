@@ -174,6 +174,14 @@ def test_feature_engine_is_strictly_pre_match_and_chronological():
     assert target.data_cutoff_at == datetime(2024, 1, 12, 12, tzinfo=timezone.utc)
 
 
+def test_football_actuals_include_derived_market_targets_without_using_features():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}); Base.metadata.create_all(engine)
+    payload = normalize_football({"fixture": {"id": 1, "date": "2024-01-01T12:00:00+00:00", "status": {"short": "FT"}}, "league": {"id": 39, "name": "Targets", "country": "X", "season": 2024}, "teams": {"home": {"id": 1, "name": "A"}, "away": {"id": 2, "name": "B"}}, "goals": {"home": 2, "away": 1}})
+    with Session(engine) as db:
+        ingest_fixtures(db, [payload]); row = FootballFeatureEngine(minimum_history=1).build(db)[0]
+    assert row.actual == {"home_goals": 2.0, "away_goals": 1.0, "total": 3.0, "margin": 1.0, "home_win": 1.0, "draw": 0.0, "away_win": 0.0, "btts_yes": 1.0, "btts_no": 0.0}
+
+
 def test_chronological_split_keeps_same_timestamp_group_atomic():
     rows = []
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)

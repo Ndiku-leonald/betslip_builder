@@ -291,6 +291,12 @@ class ApiSportsProvider:
         if season: params["season"] = str(season)
         return await self._fixtures(params)
 
+    async def football_fixtures_by_league_season(self, league: str, season: str) -> list[NormalizedFixture]:
+        """Fetch one explicitly selected API-Football league season."""
+        if self.name != "api-football":
+            raise ProviderError(self.name, "league-season fixtures are only supported by api-football")
+        return await self._fixtures({"league": str(league), "season": str(season)})
+
     async def live_fixtures(self) -> list[NormalizedFixture]:
         return await self._fixtures({"live": "all"})
 

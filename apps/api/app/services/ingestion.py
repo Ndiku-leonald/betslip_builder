@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.freshness import classify_freshness
 from app.live.persistence import persist_live_match_snapshot
 from app.live.state import normalize_basketball_live_state, normalize_football_live_state
-from app.models import Competition, Country, Fixture, ProviderEntityMapping, Sport, Team
+from app.models import Competition, Country, Fixture, ProviderEntityMapping, Season, Sport, Team
 from app.providers.base import NormalizedFixture
 
 logger = logging.getLogger(__name__)
@@ -41,11 +41,21 @@ def ingest_fixtures(db: Session, items: list[NormalizedFixture]) -> int:
         country = None
         if item.country_name:
             country = _get_or_create(db, Country, {"name": item.country_name}, {"code": None})
-        competition = _get_or_create(
-            db, Competition,
-            {"sport_id": sport.id, "name": item.competition_name},
-            {"country_id": country.id if country else None, "provider_id": item.competition_provider_id},
-        )
+        competition_filters = {"sport_id": sport.id, "name": item.competition_name}
+        if item.competition_provider_id:
+            competition_filters["provider_id"] = item.competition_provider_id
+        competition_values = {"country_id": country.id if country else None}
+        if "provider_id" not in competition_filters:
+            competition_values["provider_id"] = item.competition_provider_id
+        competition = _get_or_create(db, Competition, competition_filters, competition_values)
+        season = None
+        if item.season_name:
+            season = _get_or_create(
+                db,
+                Season,
+                {"competition_id": competition.id, "name": item.season_name},
+                {"provider_id": item.season_name},
+            )
         home = _get_or_create(db, Team, {"sport_id": sport.id, "name": item.home_name}, {"short_name": None, "logo_url": None})
         away = _get_or_create(db, Team, {"sport_id": sport.id, "name": item.away_name}, {"short_name": None, "logo_url": None})
         _mapping(db, item.provider, "team", item.home_provider_id, home.id)
@@ -53,7 +63,7 @@ def ingest_fixtures(db: Session, items: list[NormalizedFixture]) -> int:
         _mapping(db, item.provider, "competition", item.competition_provider_id or item.competition_name, competition.id)
         fixture = db.scalar(select(Fixture).filter_by(sport_id=sport.id, provider=item.provider, provider_fixture_id=item.provider_fixture_id))
         values = {
-            "competition_id": competition.id, "home_team_id": home.id, "away_team_id": away.id,
+            "competition_id": competition.id, "season_id": season.id if season else None, "home_team_id": home.id, "away_team_id": away.id,
             "kickoff_at": item.kickoff_at, "status": item.status, "status_detail": item.status_detail,
             "home_score": item.home_score, "away_score": item.away_score, "period": item.period, "clock": item.clock,
             "provider_timestamp": None, "observed_at": observed_at,

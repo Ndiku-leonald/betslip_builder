@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.freshness import classify_freshness, data_age_seconds
-from app.models import Fixture
+from app.models import Competition, Fixture, Season
 from app.providers.api_sports import normalize_football
 from app.services.ingestion import ingest_fixtures
 
@@ -23,6 +23,18 @@ def test_ingestion_is_idempotent() -> None:
         assert ingest_fixtures(db, [item]) == 1
         assert ingest_fixtures(db, [item]) == 1
         assert len(db.scalars(select(Fixture)).all()) == 1
+        assert len(db.scalars(select(Season)).all()) == 1
+
+
+def test_ingestion_keeps_same_named_provider_competitions_separate() -> None:
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    first = normalize_football(payload())
+    second = replace(first, provider_fixture_id="790", competition_provider_id="99")
+    with Session(engine) as db:
+        ingest_fixtures(db, [first, second])
+        competitions = db.scalars(select(Competition)).all()
+    assert len(competitions) == 2
 
 
 def test_freshness_is_age_aware() -> None:

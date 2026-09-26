@@ -144,6 +144,8 @@ The Stage Three API does not scrape bookmaker sites, bypass anti-bot controls, i
 
 See [docs/live-intelligence.md](docs/live-intelligence.md) for thresholds, model methodology, scheduler/quota behavior, and production limitations. The deterministic synthetic football/basketball pipeline is validation only and is not evidence of real-world predictive accuracy.
 
+The free Render staging preparation is documented in [docs/render-staging.md](docs/render-staging.md). It uses `develop`, production security validation, explicit migrations, and controlled ingestion; it is not permanent production infrastructure.
+
 ## Real data limitations
 
 Coverage varies by competition and subscription plan. Optional events, statistics, lineups, injuries, and odds may be unavailable. SlipIQ preserves that absence instead of inventing values. The frontend labels provider errors, stale data, and unavailable fields.

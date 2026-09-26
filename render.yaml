@@ -1,0 +1,179 @@
+services:
+  - type: web
+    name: slipiq-staging-api
+    runtime: docker
+    repo: https://github.com/Ndiku-leonald/betslip_builder
+    branch: develop
+    region: frankfurt
+    plan: free
+    numInstances: 1
+    autoDeployTrigger: checksPass
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    preDeployCommand: alembic -c alembic.ini upgrade head
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_PROCESS_ROLE
+        value: web
+      - key: APP_TIMEZONE
+        value: Africa/Kampala
+      - key: QUOTA_MODE
+        value: free
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: slipiq-staging-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: slipiq-staging-redis
+          type: keyvalue
+          property: connectionString
+      - key: REDIS_REQUIRED_IN_PRODUCTION
+        value: "true"
+      - key: ENABLE_SCHEDULED_INGESTION
+        value: "false"
+      - key: ENABLE_SCHEDULED_LIVE_ODDS
+        value: "false"
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: TRUSTED_HOSTS
+        fromService:
+          name: slipiq-staging-api
+          type: web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: API_FOOTBALL_BASE_URL
+        value: https://v3.football.api-sports.io
+      - key: API_FOOTBALL_KEY
+        sync: false
+      - key: API_BASKETBALL_BASE_URL
+        value: https://v1.basketball.api-sports.io
+      - key: API_BASKETBALL_KEY
+        sync: false
+      - key: API_SPORTS_KEY
+        sync: false
+      - key: FOOTBALL_DATA_BASE_URL
+        value: https://api.football-data.org/v4
+      - key: FOOTBALL_DATA_API_KEY
+        sync: false
+      - key: THE_ODDS_API_BASE_URL
+        value: https://api.the-odds-api.com/v4
+      - key: THE_ODDS_API_KEY
+        sync: false
+      - key: ENABLE_ODDS_API
+        value: "true"
+      - key: ENABLE_LIVESCORE_FOOTBALL
+        value: "false"
+      - key: ENABLE_EASY_SOCCER_DATA
+        value: "false"
+      - key: ADDITIONAL_PROVIDER_1_NAME
+        sync: false
+      - key: ADDITIONAL_PROVIDER_1_SPORTS
+        sync: false
+      - key: ADDITIONAL_PROVIDER_1_BASE_URL
+        sync: false
+      - key: ADDITIONAL_PROVIDER_1_API_KEY
+        sync: false
+      - key: ADDITIONAL_PROVIDER_1_AUTH_HEADER
+        sync: false
+      - key: ADDITIONAL_PROVIDER_1_ADAPTER
+        sync: false
+      - key: ADDITIONAL_PROVIDER_2_NAME
+        sync: false
+      - key: ADDITIONAL_PROVIDER_2_SPORTS
+        sync: false
+      - key: ADDITIONAL_PROVIDER_2_BASE_URL
+        sync: false
+      - key: ADDITIONAL_PROVIDER_2_API_KEY
+        sync: false
+      - key: ADDITIONAL_PROVIDER_2_AUTH_HEADER
+        sync: false
+      - key: ADDITIONAL_PROVIDER_2_ADAPTER
+        sync: false
+      - key: ADDITIONAL_PROVIDER_3_NAME
+        sync: false
+      - key: ADDITIONAL_PROVIDER_3_SPORTS
+        sync: false
+      - key: ADDITIONAL_PROVIDER_3_BASE_URL
+        sync: false
+      - key: ADDITIONAL_PROVIDER_3_API_KEY
+        sync: false
+      - key: ADDITIONAL_PROVIDER_3_AUTH_HEADER
+        sync: false
+      - key: ADDITIONAL_PROVIDER_3_ADAPTER
+        sync: false
+      - key: ADDITIONAL_PROVIDER_4_NAME
+        sync: false
+      - key: ADDITIONAL_PROVIDER_4_SPORTS
+        sync: false
+      - key: ADDITIONAL_PROVIDER_4_BASE_URL
+        sync: false
+      - key: ADDITIONAL_PROVIDER_4_API_KEY
+        sync: false
+      - key: ADDITIONAL_PROVIDER_4_AUTH_HEADER
+        sync: false
+      - key: ADDITIONAL_PROVIDER_4_ADAPTER
+        sync: false
+      - key: ADDITIONAL_PROVIDER_5_NAME
+        sync: false
+      - key: ADDITIONAL_PROVIDER_5_SPORTS
+        sync: false
+      - key: ADDITIONAL_PROVIDER_5_BASE_URL
+        sync: false
+      - key: ADDITIONAL_PROVIDER_5_API_KEY
+        sync: false
+      - key: ADDITIONAL_PROVIDER_5_AUTH_HEADER
+        sync: false
+      - key: ADDITIONAL_PROVIDER_5_ADAPTER
+        sync: false
+      - key: ADDITIONAL_PROVIDER_6_NAME
+        sync: false
+      - key: ADDITIONAL_PROVIDER_6_SPORTS
+        sync: false
+      - key: ADDITIONAL_PROVIDER_6_BASE_URL
+        sync: false
+      - key: ADDITIONAL_PROVIDER_6_API_KEY
+        sync: false
+      - key: ADDITIONAL_PROVIDER_6_AUTH_HEADER
+        sync: false
+      - key: ADDITIONAL_PROVIDER_6_ADAPTER
+        sync: false
+
+  - type: web
+    name: slipiq-staging-web
+    runtime: docker
+    repo: https://github.com/Ndiku-leonald/betslip_builder
+    branch: develop
+    region: frankfurt
+    plan: free
+    numInstances: 1
+    autoDeployTrigger: checksPass
+    dockerfilePath: ./apps/web/Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        fromService:
+          name: slipiq-staging-api
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+
+  - type: keyvalue
+    name: slipiq-staging-redis
+    region: frankfurt
+    plan: free
+    ipAllowList: []
+    persistenceMode: "off"
+    maxmemoryPolicy: allkeys-lru
+
+databases:
+  - name: slipiq-staging-db
+    region: frankfurt
+    plan: free
+    postgresMajorVersion: "16"
+    diskSizeGB: 1

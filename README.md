@@ -59,6 +59,18 @@ cd apps/web && npm install
 
 Set `API_FOOTBALL_KEY` and/or `API_BASKETBALL_KEY` in `.env` using keys from the API-Sports dashboard. If one API-Sports account key covers multiple products, `API_SPORTS_KEY` can be used as the fallback for both football and basketball. Additional football, basketball, and all-sports sources have six reserved `ADDITIONAL_PROVIDER_n_*` slots in `.env.example`; those slots remain unqueried until the provider's official API contract has been reviewed and a dedicated normalizer is approved. Never commit `.env`.
 
+### Add The Odds API bookmaker prices
+
+The Odds API is already supported as the optional bookmaker-price source. Copy your key into the local `.env` file only:
+
+```dotenv
+THE_ODDS_API_KEY=PASTE_YOUR_KEY_HERE
+THE_ODDS_API_BASE_URL=https://api.the-odds-api.com/v4
+ENABLE_ODDS_API=true
+```
+
+Use the key from [the-odds-api.com](https://the-odds-api.com/). Keep `ENABLE_ODDS_API=false` until the key is present. The application never prints the key; it stores immutable odds snapshots only after a documented sport key is selected and the event is matched to a canonical fixture.
+
 Optional quota overrides are `API_FOOTBALL_DAILY_LIMIT` and `API_BASKETBALL_DAILY_LIMIT`. Free mode defaults both providers to 100 outbound requests per UTC day. Real requests reserve persistent `ProviderUsage` rows before network I/O, so the allowance survives restarts; cache hits do not consume it and retries do. A process-local lock prevents same-process races. Multi-process deployments should use a shared database with an atomic reservation implementation before scaling API workers.
 
 ## Run
@@ -105,7 +117,7 @@ APScheduler is process-local. It is suitable for development and a single-worker
 
 ## Stage Three market-intelligence workflow
 
-1. Configure an approved odds source (`THE_ODDS_API_KEY` for The Odds API, or an API-Sports key for fixture-scoped odds).
+1. Configure an approved odds source (`THE_ODDS_API_KEY` plus `ENABLE_ODDS_API=true` for The Odds API, or an API-Sports key for fixture-scoped odds).
 2. Ingest odds through the refresh endpoints; snapshots are append-only and retain provider, bookmaker, selection, line, settlement semantics, and observation time.
 3. Review `/value` or the fixture-level Market intelligence tab. A candidate is shown only when odds are fresh, the market is model-supported, settlement semantics are compatible, and the selected profile's confidence, data-quality, and edge thresholds pass.
 4. Treat secondary football sources as verification context. They do not overwrite primary canonical fixture data, and conflicts remain observable through `/api/conflicts`.

@@ -18,7 +18,7 @@ The adapter uses the official API-Sports basketball host `v1.basketball.api-spor
 
 ## Stage Three sources
 
-- The Odds API: optional odds source behind an `OddsProvider` interface. It is disabled until `THE_ODDS_API_KEY` and `ENABLE_ODDS_API=true` are configured.
+- The Odds API: optional bookmaker-price source behind an `OddsProvider` interface. Configure it in local `.env` with `THE_ODDS_API_KEY`, keep `THE_ODDS_API_BASE_URL=https://api.the-odds-api.com/v4`, and set `ENABLE_ODDS_API=true` only after the key is present. See [the-odds-api.com](https://the-odds-api.com/) for the provider account and documentation. The key is never committed, logged, or returned by the API.
 - Open-Meteo: weather snapshots keyed to fixtures and venues.
 - BetPawa: only an approved feed/API via `BookmakerProvider`; no scraping or anti-bot bypass. The import adapter is disabled by default.
 - LiveScore Football: optional secondary football verification through the configured adapter. It never overwrites primary API-Sports observations by itself.

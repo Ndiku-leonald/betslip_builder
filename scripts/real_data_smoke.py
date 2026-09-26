@@ -149,6 +149,7 @@ async def run(args: argparse.Namespace) -> int:
     # Odds are real only when an upstream odds response produces normalized
     # bookmaker markets. Fair/model prices are never substituted.
     odds_saved = 0
+    odds_events_seen = 0
     if football.configured:
         with SessionLocal() as db:
             candidates = list(db.scalars(select(Fixture).where(Fixture.provider == "api-football", Fixture.status == "scheduled").order_by(Fixture.kickoff_at).limit(args.max_odds_fixtures)))
@@ -165,6 +166,7 @@ async def run(args: argparse.Namespace) -> int:
     if odds_provider is not None and odds_provider.configured and args.odds_sport_key:
         try:
             events = await odds_provider.list_events(args.odds_sport_key)
+            odds_events_seen = len(events)
             with SessionLocal() as db:
                 known = list(db.scalars(select(Fixture).where(Fixture.provider == "api-football", Fixture.status == "scheduled")))
                 known_by_id = {
@@ -183,6 +185,10 @@ async def run(args: argparse.Namespace) -> int:
             report("The Odds API", status, str(exc))
     if odds_saved:
         report("Real bookmaker odds", "PASS", f"{odds_saved} immutable snapshots stored")
+    elif odds_events_seen:
+        report("Real bookmaker odds", "SKIPPED", f"{odds_events_seen} provider events returned; none matched a scheduled canonical fixture")
+    elif odds_provider is not None and odds_provider.configured:
+        report("Real bookmaker odds", "SKIPPED", "provider configured; pass --odds-sport-key to select a documented sport")
     else:
         print("REAL ODDS PROVIDER REQUIRED — no real bookmaker prices were stored")
 

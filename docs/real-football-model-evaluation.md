@@ -657,6 +657,13 @@ The optimizer remained fail-closed because no champion-backed production predict
 - The sanitized smoke revalidated API-Football authentication and the real Africa/Kampala date window. Three date feeds returned real observations and canonical ingestion remained idempotent; the local real fixture count reached **4,360**.
 - Feature generation completed for **4,360** rows. The prediction gate correctly returned `PredictionUnavailable` because no champion model exists.
 - No bookmaker prices were available for scheduled fixtures, so the smoke reported `REAL ODDS PROVIDER REQUIRED`. Conservative **3.00**, balanced **5.00**, and aggressive **10.00** all returned `NO_SAFE_TARGET`.
-- football-data.org was correctly stopped by its configured daily quota. The Odds API remained disabled. The live probe was also quota-limited before a live response could be requested; no live capability is claimed from this rerun.
+- football-data.org was correctly stopped by its configured daily quota. The initial rerun had The Odds API disabled; it was subsequently enabled and authenticated successfully. The live probe was quota-limited before a live response could be requested; no live capability is claimed from this rerun.
 - API-Football outbound accounting increased from **80** to **85** attempts during the bounded smoke runs. No credential values were printed or persisted.
 - Browser verification passed for `/`, `/fixtures`, fixture detail, `/models`, `/value`, `/builder`, `/live`, and `/sources`; no browser console errors were observed.
+
+## The Odds API activation — 2026-09-26
+
+- `THE_ODDS_API_KEY` was validated without exposing its value, `ENABLE_ODDS_API=true` was enabled locally, and a real `soccer_epl` request returned HTTP 200 with **20 events**.
+- The returned event window was **2026-10-10 through 2026-10-19**. The stored API-Football canonical window currently ends **2026-09-27**, so conservative reconciliation matched **0** events and stored **0** odds snapshots. No unmatched event was promoted into the canonical database.
+- Because no bookmaker snapshot matched a canonical fixture and no champion-backed prediction exists, Stage Three valuation and Betslip Builder remained fail-closed; no real value or slip recommendation was generated.
+- The provider is ready for matched future fixtures after a controlled fixture refresh or a new canonical ingestion window becomes available.

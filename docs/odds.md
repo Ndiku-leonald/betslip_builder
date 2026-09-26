@@ -1,5 +1,25 @@
 # Odds and market contract
 
+## Configure The Odds API
+
+The repository already includes a The Odds API adapter for real bookmaker prices. Add the key to your local `.env` file; do not put it in source code or `.env.example`:
+
+```dotenv
+THE_ODDS_API_KEY=PASTE_YOUR_KEY_HERE
+THE_ODDS_API_BASE_URL=https://api.the-odds-api.com/v4
+ENABLE_ODDS_API=true
+```
+
+The key is from [the-odds-api.com](https://the-odds-api.com/). Leave `ENABLE_ODDS_API=false` when the key is absent. Use the manual real-data smoke with a documented sport key after configuration:
+
+```powershell
+Push-Location apps/api
+python ..\..\scripts\real_data_smoke.py --odds-sport-key soccer_epl
+Pop-Location
+```
+
+The smoke output is sanitized. It reports provider status and stored snapshot counts, never the key or request headers. A provider response is not treated as usable until its event is unambiguously matched to a canonical fixture.
+
 ## Market identity
 
 An odds snapshot is identified by provider, bookmaker, internal fixture, market family, market type, period, participant, selection, line, and settlement semantics. `participant` is `home`, `away`, or `none`; it identifies the team side when a market needs one. `selection` is the outcome (`home`, `away`, `draw`, `over`, `under`, `yes`, `no`, or `win`). For example, a football home team total is `participant=home, selection=over, line=1.5`; an away handicap is `participant=away, selection=win, line=+0.5`.

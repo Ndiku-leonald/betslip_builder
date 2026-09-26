@@ -9,7 +9,7 @@ Every odds record is normalized into an `OddsSnapshot` with the internal fixture
 Supported provider paths are:
 
 - API-Sports fixture-scoped odds through the existing server-side API-Sports adapters.
-- The Odds API behind `THE_ODDS_API_KEY` and the `OddsProvider` interface.
+- The Odds API behind `THE_ODDS_API_KEY` and the `OddsProvider` interface. Enable it with `ENABLE_ODDS_API=true` only after adding the key to local `.env`; the base URL is `https://api.the-odds-api.com/v4`.
 - BetPawa import records only through an explicitly approved feed/API. Website scraping and anti-bot bypass are out of scope.
 - LiveScore Football and EasySoccerData are secondary/experimental verification paths, isolated from the primary fixture path.
 

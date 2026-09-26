@@ -20,4 +20,6 @@ This matrix records adapter behavior from the repository and the providers' publ
 - football-data.org observations are matched by normalized team names, competition and kickoff proximity; they are not written as duplicate canonical fixtures.
 - Model probabilities and fair odds are never presented as bookmaker odds.
 - If no configured provider returns real bookmaker prices, the report must say `REAL ODDS PROVIDER REQUIRED`.
+- The Odds API requires `THE_ODDS_API_KEY` in local `.env` and `ENABLE_ODDS_API=true`; `THE_ODDS_API_BASE_URL` defaults to `https://api.the-odds-api.com/v4`.
+- The 2026-09-26 credential probe returned 20 `soccer_epl` events. Odds are stored only after event-to-canonical-fixture matching; unmatched future events remain unpersisted.
 - Provider credentials are server-side environment variables only; `.env` is ignored by Git.

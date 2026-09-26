@@ -78,7 +78,7 @@ The frontend's `NEXT_PUBLIC_API_URL` is a non-secret Blueprint reference to the 
 
 ## Migrations and first data
 
-The API service runs `alembic -c alembic.ini upgrade head` as Render's pre-deploy command before the new container serves traffic. It never downgrades and does not use `create_all` as a migration substitute.
+The API service runs `alembic -c alembic.ini upgrade head` from the image's `/app` working directory as the first part of its Render Docker startup command. Uvicorn starts only when the migration exits successfully; a migration failure stops startup. It never downgrades and does not use `create_all` as a migration substitute.
 
 A new Postgres database is empty. Populate it through a controlled, authenticated operation from the API/CLI workflow documented in the repository. Do not seed synthetic data as real staging data, and do not make providers run on every frontend page load. Keep the existing lineage gates: real data, freshness, quality, champion-model requirements, real odds requirements, and optimizer safety checks.
 

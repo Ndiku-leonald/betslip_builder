@@ -651,3 +651,12 @@ The optimizer remained fail-closed because no champion-backed production predict
 - The backfill contains fixture results but no match-statistics rows, so statistics-derived features were unavailable rather than fabricated.
 - The API-Football free entitlement allowed historical seasons through 2024 but rejected the requested 2025 season; deeper history should wait for an entitled plan or another verified source.
 - This evaluation is evidence about the current sample and architecture, not evidence of profitability or future betting performance.
+
+## Commissioning rerun — 2026-09-26
+
+- The sanitized smoke revalidated API-Football authentication and the real Africa/Kampala date window. Three date feeds returned real observations and canonical ingestion remained idempotent; the local real fixture count reached **4,360**.
+- Feature generation completed for **4,360** rows. The prediction gate correctly returned `PredictionUnavailable` because no champion model exists.
+- No bookmaker prices were available for scheduled fixtures, so the smoke reported `REAL ODDS PROVIDER REQUIRED`. Conservative **3.00**, balanced **5.00**, and aggressive **10.00** all returned `NO_SAFE_TARGET`.
+- football-data.org was correctly stopped by its configured daily quota. The Odds API remained disabled. The live probe was also quota-limited before a live response could be requested; no live capability is claimed from this rerun.
+- API-Football outbound accounting increased from **80** to **85** attempts during the bounded smoke runs. No credential values were printed or persisted.
+- Browser verification passed for `/`, `/fixtures`, fixture detail, `/models`, `/value`, `/builder`, `/live`, and `/sources`; no browser console errors were observed.

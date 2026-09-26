@@ -111,6 +111,8 @@ class ApiSportsProvider:
         self.name, self.key, self.base_url, self.cache, self.quota = name, key, base_url.rstrip("/"), cache, quota
         self.configured = bool(key)
         self.capabilities = {"stats": True, "player_stats": True, "events": name == "api-football", "lineups": name == "api-football"}
+        if name == "api-football":
+            self.capabilities.update({"fixtures": True, "competitions": True, "injuries": True, "standings": True, "prematch_odds": True, "live_odds": True})
         self.last_success_at: datetime | None = None
         self.last_error: str | None = None
         self.last_latency_ms: float | None = None
@@ -303,6 +305,14 @@ class ApiSportsProvider:
 
     async def football_lineups(self, provider_fixture_id: str) -> dict[str, Any]:
         return await self.football_fixture_details(provider_fixture_id)
+
+    async def football_leagues(self, *, league: str | None = None, season: str | None = None) -> dict[str, Any]:
+        if self.name != "api-football":
+            raise ProviderError(self.name, "competitions is not supported by this provider")
+        params: dict[str, str] = {}
+        if league: params["id"] = str(league)
+        if season: params["season"] = str(season)
+        return await self._request("leagues", params)
 
     async def basketball_game_details(self, provider_fixture_id: str) -> dict[str, Any]:
         return await self._request("games", {"id": provider_fixture_id})

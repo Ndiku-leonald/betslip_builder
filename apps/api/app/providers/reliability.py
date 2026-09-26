@@ -4,6 +4,7 @@ from __future__ import annotations
 SOURCE_ROLES = {
     "api-football": {"tier": "primary", "configured_priority": 100},
     "api-basketball": {"tier": "primary", "configured_priority": 100},
+    "football-data.org": {"tier": "secondary", "configured_priority": 70},
     "livescore-football": {"tier": "secondary", "configured_priority": 60},
     "easy-soccer-data": {"tier": "experimental_secondary", "configured_priority": 20},
     "the-odds-api": {"tier": "odds_context", "configured_priority": 50},

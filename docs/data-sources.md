@@ -6,6 +6,12 @@ The adapter uses the official API-Sports host `v3.football.api-sports.io`. Phase
 
 API-Football fixture details can include events, statistics, lineups, and players when the competition and subscription cover them.
 
+API-Football remains the primary football adapter. Standings, injuries, odds and live-detail coverage are checked against the provider response and subscription coverage; missing fields remain unavailable.
+
+## football-data.org
+
+The optional `football-data.org` v4 adapter is secondary validation only. The official API exposes competitions, matches/results, teams, standings, scorers and team match lists. It is not treated as a bookmaker-odds, lineup, injury or rich live-statistics source. Secondary observations are matched to the primary canonical fixture before they affect consensus and are not ingested as duplicate production fixtures.
+
 ## API-Basketball
 
 The adapter uses the official API-Sports basketball host `v1.basketball.api-sports.io`. Phase 1 calls countries, leagues, teams, date games, live games, game details, and the documented `games/statistics/teams` endpoint. Player statistics are exposed separately through `games/statistics/players`. Basketball status, periods, and scores are normalized independently from football; football events and lineups are not fabricated for basketball.

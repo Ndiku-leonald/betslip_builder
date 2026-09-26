@@ -1,6 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,8 +15,50 @@ class Settings(BaseSettings):
     release: str | None = None
     api_football_key: str | None = None
     api_basketball_key: str | None = None
+    api_sports_key: str | None = None
+    api_football_base_url: str = "https://v3.football.api-sports.io"
+    api_basketball_base_url: str = "https://v1.basketball.api-sports.io"
     api_football_daily_limit: int | None = None
     api_basketball_daily_limit: int | None = None
+    football_data_api_key: str | None = None
+    football_data_base_url: str = "https://api.football-data.org/v4"
+    football_data_daily_limit: int | None = None
+    additional_provider_1_name: str | None = None
+    additional_provider_1_sports: str | None = None
+    additional_provider_1_base_url: str | None = None
+    additional_provider_1_api_key: str | None = None
+    additional_provider_1_auth_header: str = "Authorization"
+    additional_provider_1_adapter: str = "pending"
+    additional_provider_2_name: str | None = None
+    additional_provider_2_sports: str | None = None
+    additional_provider_2_base_url: str | None = None
+    additional_provider_2_api_key: str | None = None
+    additional_provider_2_auth_header: str = "Authorization"
+    additional_provider_2_adapter: str = "pending"
+    additional_provider_3_name: str | None = None
+    additional_provider_3_sports: str | None = None
+    additional_provider_3_base_url: str | None = None
+    additional_provider_3_api_key: str | None = None
+    additional_provider_3_auth_header: str = "Authorization"
+    additional_provider_3_adapter: str = "pending"
+    additional_provider_4_name: str | None = None
+    additional_provider_4_sports: str | None = None
+    additional_provider_4_base_url: str | None = None
+    additional_provider_4_api_key: str | None = None
+    additional_provider_4_auth_header: str = "Authorization"
+    additional_provider_4_adapter: str = "pending"
+    additional_provider_5_name: str | None = None
+    additional_provider_5_sports: str | None = None
+    additional_provider_5_base_url: str | None = None
+    additional_provider_5_api_key: str | None = None
+    additional_provider_5_auth_header: str = "Authorization"
+    additional_provider_5_adapter: str = "pending"
+    additional_provider_6_name: str | None = None
+    additional_provider_6_sports: str | None = None
+    additional_provider_6_base_url: str | None = None
+    additional_provider_6_api_key: str | None = None
+    additional_provider_6_auth_header: str = "Authorization"
+    additional_provider_6_adapter: str = "pending"
     database_url: str = "sqlite:///./slipiq.db"
     db_pool_size: int = 5
     db_max_overflow: int = 10
@@ -56,6 +98,8 @@ class Settings(BaseSettings):
     enable_livescore_football: bool = True
     enable_easy_soccer_data: bool = False
     the_odds_api_key: str | None = None
+    the_odds_api_base_url: str = "https://api.the-odds-api.com/v4"
+    the_odds_api_daily_limit: int | None = None
     enable_odds_api: bool = False
     odds_prematch_ttl_seconds: int = 1800
     odds_live_ttl_seconds: int = 30
@@ -73,7 +117,7 @@ class Settings(BaseSettings):
     betpawa_feed_url: str | None = None
     betpawa_api_key: str | None = None
 
-    @field_validator("live_poll_seconds", "prematch_refresh_minutes", "odds_refresh_seconds", "live_data_stale_seconds", "live_stats_stale_seconds", "live_odds_stale_seconds", "live_refresh_cooldown_seconds", "basketball_period_minutes", "basketball_regulation_periods", "basketball_overtime_minutes", "api_football_daily_limit", "api_basketball_daily_limit")
+    @field_validator("live_poll_seconds", "prematch_refresh_minutes", "odds_refresh_seconds", "live_data_stale_seconds", "live_stats_stale_seconds", "live_odds_stale_seconds", "live_refresh_cooldown_seconds", "basketball_period_minutes", "basketball_regulation_periods", "basketball_overtime_minutes", "api_football_daily_limit", "api_basketball_daily_limit", "football_data_daily_limit")
     @classmethod
     def positive_interval(cls, value: int | None) -> int | None:
         if value is not None and value <= 0:
@@ -110,11 +154,24 @@ class Settings(BaseSettings):
 
     @property
     def provider_daily_limits(self) -> dict[str, int]:
-        limits = {"api-football": 100, "api-basketball": 100} if self.quota_mode == "free" else {}
-        for provider, value in (("api-football", self.api_football_daily_limit), ("api-basketball", self.api_basketball_daily_limit)):
+        limits = {"api-football": 100, "api-basketball": 100, "football-data.org": 10} if self.quota_mode == "free" else {}
+        for provider, value in (("api-football", self.api_football_daily_limit), ("api-basketball", self.api_basketball_daily_limit), ("football-data.org", self.football_data_daily_limit), ("the-odds-api", self.the_odds_api_daily_limit)):
             if value is not None:
                 limits[provider] = value
         return limits
+
+    @property
+    def additional_provider_slots(self) -> list[dict[str, Any]]:
+        slots: list[dict[str, Any]] = []
+        for index in range(1, 7):
+            values = {key: getattr(self, f"additional_provider_{index}_{key}") for key in ("name", "sports", "base_url", "api_key", "auth_header", "adapter")}
+            if any(values[key] for key in ("name", "base_url", "api_key")):
+                values["slot"] = index
+                values["configured"] = bool(values["base_url"] and values["api_key"])
+                values["enabled"] = bool(values["base_url"])
+                values["sports"] = [item.strip() for item in str(values["sports"] or "").split(",") if item.strip()]
+                slots.append(values)
+        return slots
 
     @property
     def cors_origins(self) -> list[str]:

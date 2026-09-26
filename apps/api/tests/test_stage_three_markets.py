@@ -10,7 +10,7 @@ from app.markets.value import MarketValueService, market_freshness, odds_consens
 from app.markets.storage import latest_market_snapshots, market_snapshot_history, persist_market_snapshots
 from app.odds.math import expected_value, fair_decimal_odds, fair_decimal_odds_with_push, implied_probability, no_vig, overround
 from app.odds.ontology import NormalizedMarket, decimal_odds, normalize_external_market
-from app.odds.providers import parse_api_sports_odds, parse_the_odds_api
+from app.odds.providers import OddsApiError, TheOddsApiProvider, parse_api_sports_odds, parse_the_odds_api
 from app.main import _family_for_market
 from app.prediction.football import FootballPoissonModel
 from app.features.common import FeatureRow
@@ -43,6 +43,88 @@ def test_market_names_normalize_but_settlement_does_not():
     assert ot.settlement_semantics == "including_overtime" and regulation.settlement_semantics == "regulation"
 
 
+def test_side_labeled_team_total_does_not_abort_normalization():
+    market = normalize_external_market(
+        fixture_id="fixture-1",
+        sport="football",
+        provider="api-sports-odds",
+        bookmaker="Bookmaker",
+        market_name="Total - Home",
+        selection_name="Home",
+        odds="2.10",
+        participant="home",
+    )
+    assert market.market_family == "team_total"
+    assert market.selection == "unknown"
+    assert market.participant == "home"
+
+
+def test_slash_form_double_chance_is_normalized():
+    market = normalize_external_market(
+        fixture_id="fixture-1",
+        sport="football",
+        provider="api-sports-odds",
+        bookmaker="Bookmaker",
+        market_name="Double Chance",
+        selection_name="Home / Draw",
+        odds="1.35",
+    )
+    assert market.market_family == "double_chance"
+    assert market.selection == "home_draw"
+
+
+def test_unsupported_provider_selection_is_fail_closed():
+    market = normalize_external_market(
+        fixture_id="fixture-1",
+        sport="football",
+        provider="api-sports-odds",
+        bookmaker="Bookmaker",
+        market_name="Provider Specific Market",
+        selection_name="Home / Draw",
+        odds="1.35",
+    )
+    assert market.selection == "unknown"
+
+
+def test_invalid_provider_odds_are_skipped():
+    payload = {"response": [{
+        "fixture": {"id": 1},
+        "teams": {"home": {"name": "Home"}, "away": {"name": "Away"}},
+        "bookmakers": [{"name": "Bookmaker", "bets": [{
+            "name": "Match Winner",
+            "values": [{"value": "Home", "odd": "0"}, {"value": "Away", "odd": "2.0"}],
+        }]}],
+    }]}
+    markets = parse_api_sports_odds(payload, "fixture-1", "football")
+    assert len(markets) == 1 and markets[0].selection == "away"
+
+
+@pytest.mark.asyncio
+async def test_the_odds_api_quota_headers_and_exhaustion_are_handled():
+    calls = []
+
+    class Response:
+        status_code = 200
+        headers = {"x-requests-remaining": "7"}
+
+        def json(self):
+            return []
+
+    class Client:
+        async def get(self, url, params=None):
+            calls.append((url, params))
+            return Response()
+
+    quota = __import__("app.quota", fromlist=["QuotaManager"]).QuotaManager(mode="standard", daily_limits={"the-odds-api": 1})
+    provider = TheOddsApiProvider("secret", client=Client(), quota=quota)
+    assert await provider._get("sports/upcoming/odds", {"regions": "eu", "markets": "h2h"}) == []
+    assert calls[0][1]["apiKey"] == "secret"
+    assert provider.last_rate_limit_remaining == 7
+    with pytest.raises(OddsApiError, match="quota"):
+        await provider._get("sports/upcoming/odds", {"regions": "eu", "markets": "h2h"})
+    assert provider.last_status_code == 429
+
+
 def test_documented_provider_payloads_are_normalized():
     odds_event = {"id": "event-1", "home_team": "Manchester City", "away_team": "Liverpool", "bookmakers": [{"title": "Book B", "last_update": "2026-09-16T10:00:00+00:00", "markets": [{"key": "h2h", "last_update": "2026-09-16T10:01:00+00:00", "outcomes": [{"name": "Manchester City", "price": 1.5}, {"name": "Liverpool", "price": 4.5}, {"name": "Draw", "price": 4.0}]}, {"key": "spreads", "outcomes": [{"name": "Liverpool", "price": 2.1, "point": 0.5}]}, {"key": "totals", "outcomes": [{"name": "Over", "price": 1.9, "point": 2.5}, {"name": "Under", "price": 1.9, "point": 2.5}]}]}]}
     football = parse_the_odds_api([odds_event], "internal", "football")
@@ -62,7 +144,7 @@ def test_realistic_api_sports_participant_market_payloads_are_normalized():
                 {"value": "Manchester City", "odd": "1.50"}, {"value": "Draw", "odd": "4.00"}, {"value": "Liverpool", "odd": "5.50"}
             ]},
             {"name": "Asian Handicap", "values": [
-                {"value": "Home", "handicap": "-0.5", "odd": "1.90"}, {"value": "Away", "handicap": "+0.5", "odd": "1.95"}
+                {"value": "Home -0.5", "odd": "1.90"}, {"value": "Away +0.5", "odd": "1.95"}
             ]},
             {"name": "Home Team Total Goals", "values": [{"value": "Over 1.5", "odd": "1.80"}]},
             {"name": "Away Team Total Goals", "values": [{"value": "Under 1.5", "odd": "1.85"}]},

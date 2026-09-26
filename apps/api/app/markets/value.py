@@ -87,6 +87,8 @@ def _compatible_market_group(market, group) -> tuple[bool, str]:
     if not group: return False, "incomplete_market"
     comparable = [item for item in group if getattr(item, "status", getattr(item, "market_status", "open")) == "open" and item.decimal_odds is not None]
     if market.market_family in {"handicap", "spread"}:
+        if handicap_home_line(market) is None or any(handicap_home_line(item) is None for item in comparable):
+            return False, "incomplete_market"
         context = (market.provider, market.fixture_id, market.bookmaker, market.market_family, market.market_type, market.period, market.settlement_semantics)
         if not all((item.provider, item.fixture_id, item.bookmaker, item.market_family, item.market_type, item.period, item.settlement_semantics) == context for item in comparable): return False, "incomplete_market"
         participants = {item.participant for item in comparable}

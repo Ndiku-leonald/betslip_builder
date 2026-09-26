@@ -170,6 +170,11 @@ class SlipOptimizer:
         fixture_rows = list(db.scalars(query))
         gate = CandidateGate(params, profile)
         for fixture in fixture_rows:
+            # Synthetic fixtures are validation fixtures only. Keep them
+            # available to tests and explicit synthetic pipelines, but fail
+            # closed for production recommendations.
+            if (get_settings().app_env == "production" or params.get("real_only")) and str(fixture.provider).startswith("synthetic"):
+                continue
             kickoff = _utc(fixture.kickoff_at)
             is_live_fixture = fixture.status in {"live", "halftime"}
             if is_live_fixture and not include_live: continue

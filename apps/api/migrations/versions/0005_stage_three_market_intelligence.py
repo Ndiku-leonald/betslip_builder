@@ -41,5 +41,7 @@ def downgrade() -> None:
     op.drop_index("ix_provider_conflicts_observed_at", table_name="provider_conflicts")
     op.drop_index("ix_provider_conflicts_fixture_id", table_name="provider_conflicts")
     op.drop_table("provider_conflicts")
+    for name in ("observed_at", "market_family", "bookmaker", "source_event_id"):
+        op.drop_index(f"ix_odds_snapshots_{name}", table_name="odds_snapshots")
     for name in ("provider_updated_at", "observed_at", "settlement_semantics", "market_status", "decimal_odds", "line", "selection", "period", "market_type", "market_family", "bookmaker", "source_event_id"):
         op.drop_column("odds_snapshots", name)

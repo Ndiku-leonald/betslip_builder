@@ -57,7 +57,7 @@ alembic -c apps/api/alembic.ini upgrade head
 cd apps/web && npm install
 ```
 
-Set `API_FOOTBALL_KEY` and/or `API_BASKETBALL_KEY` in `.env` using keys from the API-Sports dashboard. Never commit `.env`.
+Set `API_FOOTBALL_KEY` and/or `API_BASKETBALL_KEY` in `.env` using keys from the API-Sports dashboard. If one API-Sports account key covers multiple products, `API_SPORTS_KEY` can be used as the fallback for both football and basketball. Additional football, basketball, and all-sports sources have six reserved `ADDITIONAL_PROVIDER_n_*` slots in `.env.example`; those slots remain unqueried until the provider's official API contract has been reviewed and a dedicated normalizer is approved. Never commit `.env`.
 
 Optional quota overrides are `API_FOOTBALL_DAILY_LIMIT` and `API_BASKETBALL_DAILY_LIMIT`. Free mode defaults both providers to 100 outbound requests per UTC day. Real requests reserve persistent `ProviderUsage` rows before network I/O, so the allowance survives restarts; cache hits do not consume it and retries do. A process-local lock prevents same-process races. Multi-process deployments should use a shared database with an atomic reservation implementation before scaling API workers.
 

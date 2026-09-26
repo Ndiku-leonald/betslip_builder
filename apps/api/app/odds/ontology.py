@@ -68,13 +68,14 @@ class NormalizedMarket:
 
 def _selection(name: str, family: str, sport: str) -> str:
     value = " ".join(str(name).lower().replace("_", " ").split())
+    value = value.replace(" / ", "/")
     if value in {"home", "home team", "1", "team 1"}: return "home"
     if value in {"away", "away team", "2", "team 2"}: return "away"
     if value in {"draw", "x", "tie"}: return "draw"
     if family == "double_chance":
-        if value in {"1x", "home or draw", "home draw"}: return "home_draw"
-        if value in {"x2", "draw or away", "draw away"}: return "draw_away"
-        if value in {"12", "home or away", "home away"}: return "home_away"
+        if value in {"1x", "home or draw", "home draw", "home/draw"}: return "home_draw"
+        if value in {"x2", "draw or away", "draw away", "draw/away"}: return "draw_away"
+        if value in {"12", "home or away", "home away", "home/away"}: return "home_away"
     if family == "draw_no_bet":
         if value in {"home", "home team", "1", "team 1"}: return "home"
         if value in {"away", "away team", "2", "team 2"}: return "away"
@@ -126,7 +127,14 @@ def normalize_external_market(*, fixture_id: str, sport: str, provider: str, boo
         if normalized_participant == "none":
             lowered = str(selection_name).lower()
             normalized_participant = "home" if "home" in lowered else "away" if "away" in lowered else "none"
-        normalized_selection = "over" if str(selection_name).lower().startswith("over") else "under" if str(selection_name).lower().startswith("under") else normalized_selection
+        normalized_selection = "over" if str(selection_name).lower().startswith("over") else "under" if str(selection_name).lower().startswith("under") else "unknown"
     if family in {"handicap", "spread"}:
         normalized_selection = "win"
+    if normalized_selection not in VALID_SELECTIONS:
+        normalized_selection = "unknown"
+    # Some feeds attach a side participant to an outcome-shaped label
+    # (participant=home, selection=home). Preserve the observation as a
+    # non-eligible market instead of aborting the whole provider response.
+    if normalized_participant != "none" and normalized_selection in {"home", "away", "draw", "yes", "no"}:
+        normalized_participant = "none"
     return NormalizedMarket(fixture_id=str(fixture_id), sport=sport, bookmaker=str(bookmaker), provider=provider, market_family=family, market_type=market_type, period=period, participant=normalized_participant, selection=normalized_selection, line=float(line) if line is not None else None, decimal_odds=decimal_odds(odds, odds_format) if status == "open" else None, status=status, settlement_semantics=settlement_semantics, observed_at=observed_at or datetime.now(timezone.utc), provider_updated_at=provider_updated_at, source_event_id=source_event_id, raw=raw or {})

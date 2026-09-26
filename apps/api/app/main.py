@@ -23,6 +23,7 @@ from app.models import BacktestRun, Competition, Fixture, LiveMatchSnapshot, Mod
 from app.providers.api_sports import ApiSportsProvider, ProviderError, _parse_dt
 from app.providers.easy_soccer_data import EasySoccerDataProvider
 from app.providers.livescore_football import LiveScoreFootballProvider
+from app.providers.football_data import FootballDataProvider, FootballDataError
 from app.providers.matching import match_fixture
 from app.odds.providers import ApiSportsOddsProvider, TheOddsApiProvider, parse_the_odds_api
 from app.markets.consensus import ProviderConsensusService
@@ -52,12 +53,14 @@ cache = CacheBackend(settings.redis_url, required=settings.app_env == "productio
 quota_store = PersistentQuotaStore(SessionLocal)
 quota = QuotaManager(settings.quota_mode, daily_limits=settings.provider_daily_limits, count_callback=quota_store.count_today, reserve_callback=quota_store.reserve, complete_callback=quota_store.complete)
 provider_options = {"connect_timeout": settings.provider_connect_timeout, "read_timeout": settings.provider_read_timeout, "retry_attempts": settings.provider_retry_attempts, "retry_base_seconds": settings.provider_retry_base_seconds, "circuit_failure_threshold": settings.provider_circuit_failure_threshold, "circuit_cooldown_seconds": settings.provider_circuit_cooldown_seconds}
-football = ApiSportsProvider(name="api-football", key=settings.api_football_key, base_url="https://v3.football.api-sports.io", cache=cache, quota=quota, **provider_options)
-basketball = ApiSportsProvider(name="api-basketball", key=settings.api_basketball_key, base_url="https://v1.basketball.api-sports.io", cache=cache, quota=quota, **provider_options)
+api_sports_key = settings.api_sports_key
+football = ApiSportsProvider(name="api-football", key=settings.api_football_key or api_sports_key, base_url=settings.api_football_base_url, cache=cache, quota=quota, **provider_options)
+basketball = ApiSportsProvider(name="api-basketball", key=settings.api_basketball_key or api_sports_key, base_url=settings.api_basketball_base_url, cache=cache, quota=quota, **provider_options)
 providers = {"football": football, "basketball": basketball}
+football_data = FootballDataProvider(settings.football_data_api_key, base_url=settings.football_data_base_url, cache=cache, quota=quota, timeout=settings.provider_read_timeout)
 secondary_football = LiveScoreFootballProvider(settings.livescore_football_base_url, cache=cache) if settings.enable_livescore_football else None
 experimental_football = EasySoccerDataProvider(settings.enable_easy_soccer_data)
-odds_provider = TheOddsApiProvider(settings.the_odds_api_key) if settings.enable_odds_api else None
+odds_provider = TheOddsApiProvider(settings.the_odds_api_key, base_url=settings.the_odds_api_base_url, quota=quota) if settings.enable_odds_api else None
 api_sports_odds = {"football": ApiSportsOddsProvider(football), "basketball": ApiSportsOddsProvider(basketball)}
 consensus_service = ProviderConsensusService()
 market_value_service = MarketValueService()
@@ -864,7 +867,7 @@ async def refresh_odds(sport_key: str = Query(..., min_length=2, max_length=80),
 @app.get("/api/providers/status", response_model=list[ProviderStatus])
 def provider_status(db: Session = Depends(get_db)) -> list[ProviderStatus]:
     result = []
-    for provider in providers.values():
+    for provider in [*providers.values(), football_data, *( [secondary_football] if secondary_football is not None else [] )]:
         health = db.scalar(select(ProviderHealth).where(ProviderHealth.provider == provider.name))
         if health is not None:
             result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=provider.configured and health.healthy, last_success_at=health.last_success_at, last_error=health.last_error, latency_ms=health.last_latency_ms, calls_today=health.calls_today, capabilities=provider.capabilities))
@@ -874,20 +877,24 @@ def provider_status(db: Session = Depends(get_db)) -> list[ProviderStatus]:
         successful = next((item for item in usage if item.status_code is not None and item.status_code < 400 and not item.error), None)
         latest = usage[0] if usage else None
         calls_today = db.scalar(select(func.count(ProviderUsage.id)).where(ProviderUsage.provider == provider.name, ProviderUsage.requested_at >= day_start, ProviderUsage.cache_hit.is_(False), ProviderUsage.external_request.is_(True))) or 0
-        result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=bool(successful and (latest is None or not latest.error)), last_success_at=successful.requested_at if successful else provider.last_success_at, last_error=latest.error if latest and latest.error else provider.last_error, latency_ms=latest.latency_ms if latest else provider.last_latency_ms, calls_today=int(calls_today), capabilities=provider.capabilities))
+        result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=bool(successful and (latest is None or not latest.error)) if provider.name != "livescore-football" else bool(provider.last_success_at and not provider.last_error), last_success_at=successful.requested_at if successful else provider.last_success_at, last_error=latest.error if latest and latest.error else provider.last_error, latency_ms=latest.latency_ms if latest else provider.last_latency_ms, calls_today=int(calls_today) if provider.name != "livescore-football" else 0, capabilities=provider.capabilities))
     return result
 
 
 @app.get("/api/data-sources")
 def data_sources() -> list[dict]:
-    return [
+    sources = [
         {"provider": "api-football", "configured": football.configured, "enabled": True, "role": "primary", "capabilities": football.capabilities},
         {"provider": "api-basketball", "configured": basketball.configured, "enabled": True, "role": "primary", "capabilities": basketball.capabilities},
+        {"provider": football_data.name, "configured": football_data.configured, "enabled": True, "role": "secondary_validation", "capabilities": football_data.capabilities},
         {"provider": "livescore-football", "configured": bool(secondary_football), "enabled": bool(secondary_football), "role": "secondary", "capabilities": (secondary_football.capabilities if secondary_football else {})},
         {"provider": "easy-soccer-data", "configured": experimental_football.configured, "enabled": experimental_football.enabled, "role": "experimental_secondary", "capabilities": experimental_football.capabilities},
         {"provider": "the-odds-api", "configured": bool(odds_provider and odds_provider.configured), "enabled": bool(odds_provider), "role": "odds_context", "capabilities": {"odds": True}},
         {"provider": "betpawa-import", "configured": False, "enabled": True, "role": "target_import", "capabilities": {"json_import": True, "csv_import": True, "manual_import": True}},
     ]
+    for slot in settings.additional_provider_slots:
+        sources.append({"provider": slot["name"] or f"additional-provider-{slot['slot']}", "configured": slot["configured"], "enabled": slot["enabled"], "role": "additional_pending_adapter", "sports": slot["sports"], "adapter": slot["adapter"], "capabilities": {"adapter_pending": True}})
+    return sources
 
 
 @app.get("/api/providers/reliability")

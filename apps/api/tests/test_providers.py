@@ -128,3 +128,55 @@ async def test_basketball_statistics_capabilities_use_documented_endpoints(monke
     assert [params for _, params in calls] == [{"id": "123"}, {"id": "123"}]
     assert provider.capabilities == {"stats": True, "player_stats": True, "events": False, "lineups": False}
     assert player_data["response"] == payload["response"]
+
+
+@pytest.mark.asyncio
+async def test_football_data_v4_normalizes_timezone_and_uses_auth_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.providers.football_data as provider_module
+    from app.providers.football_data import FootballDataProvider
+
+    calls = []
+    payload = {"matches": [{
+        "id": 99,
+        "utcDate": "2026-09-24T15:00:00Z",
+        "status": "FINISHED",
+        "lastUpdated": "2026-09-24T17:01:00Z",
+        "competition": {"id": 2021, "name": "Premier League"},
+        "area": {"name": "England"},
+        "season": {"startDate": "2026-08-01"},
+        "homeTeam": {"id": 65, "name": "Manchester City"},
+        "awayTeam": {"id": 66, "name": "Liverpool FC"},
+        "score": {"fullTime": {"home": 2, "away": 1}},
+    }]}
+
+    class Response:
+        status_code = 200
+        headers = {"X-Requests-Available-Minute": "9"}
+
+        def json(self):
+            return payload
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, params=None, headers=None):
+            calls.append((url, params, headers))
+            return Response()
+
+    monkeypatch.setattr(provider_module.httpx, "AsyncClient", Client)
+    provider = FootballDataProvider("configured", cache=MemoryCache(), quota=QuotaManager(mode="standard"))
+    fixtures = await provider.fixtures_by_date("2026-09-24")
+
+    assert fixtures[0].status == "finished"
+    assert fixtures[0].kickoff_at is not None and fixtures[0].kickoff_at.tzinfo is not None
+    assert fixtures[0].home_score == 2 and fixtures[0].away_score == 1
+    assert calls[0][0].endswith("/matches")
+    assert calls[0][2] == {"X-Auth-Token": "configured"}
+    assert provider.last_rate_limit_remaining == 9

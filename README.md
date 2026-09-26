@@ -109,6 +109,17 @@ Pop-Location
 
 Each operation reports `PASS`, `SKIPPED`, or `FAILED`; API keys are never printed. With no keys configured, all provider checks are `SKIPPED`.
 
+For a quota-bounded football activation check, exercise API-Football and The Odds API without a live or coverage fan-out:
+
+```powershell
+Push-Location apps/api
+$env:PYTHONPATH = (Get-Location).Path
+python ..\..\scripts\real_data_smoke.py --max-requests 1 --max-detail-fixtures 0 --max-odds-fixtures 0 --odds-sport-key soccer_epl --no-coverage --no-live
+Pop-Location
+```
+
+The smoke test never treats The Odds API events as canonical fixtures. It stores bookmaker prices only after unambiguous competition/team/kickoff reconciliation, and it reports `NO_SAFE_TARGET` when the real fixture, feature, champion-model and odds lineage is incomplete.
+
 ## Quota and freshness
 
 `QUOTA_MODE` accepts `free`, `standard`, or `realtime`. Free mode applies longer cache windows and avoids background polling. Fixture `kickoff_at` is separate from `observed_at` (the successful fetch time); `provider_updated_at` is only populated when the upstream supplies a trustworthy update time. Freshness and `data_age_seconds` use observation time, never kickoff time. The API exposes provider usage and health so stale or unavailable data is visible.

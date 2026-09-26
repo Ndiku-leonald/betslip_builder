@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.db import Base, get_db
-from app.models import Fixture, OddsSnapshot, Prediction
+from app.models import Fixture, FixtureFeatureSnapshot, ModelVersion, OddsSnapshot, Prediction
 from app.schemas import SlipBuildRequest
 from app.slips.backtest import evaluate_optimizer_backtest
 from app.slips.config import PROFILE_CONFIG
@@ -146,6 +146,44 @@ def test_date_status_and_mode_filters_exclude_live_completed_and_out_of_range_fi
         assert fixtures[1].id not in {item["fixture_id"] for item in pool.candidates}
         live_request = {**request, "mode": "live", "include_live": True}
         assert SlipOptimizer().candidate_pool(db, live_request).candidates == []
+
+
+def test_real_only_recommendations_require_complete_real_lineage():
+    engine = _db(); now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(engine) as db:
+        _seed(db, now)
+        fixture = db.scalar(select(Fixture).where(Fixture.provider == "api-football", Fixture.status == "scheduled").order_by(Fixture.kickoff_at))
+        prediction = db.scalar(select(Prediction).where(Prediction.fixture_id == fixture.id, Prediction.prediction_type == "pre_match"))
+        request = {"sports": ["football"], "start_date": now.date(), "end_date": now.date() + timedelta(days=1), "profile": "balanced", "mode": "prematch", "include_live": False, "real_only": True, "min_confidence": 0, "min_data_quality": 0, "min_probability": 0, "max_individual_odds": 3, "target_odds": 3, "target_tolerance": .1, "min_legs": 1, "max_legs": 2}
+        optimizer = SlipOptimizer()
+
+        missing = optimizer.candidate_pool(db, request)
+        assert not missing.candidates
+        assert missing.diagnostics["rejection_reasons"]["missing_feature_snapshot"] >= 1
+        assert missing.diagnostics["rejection_reasons"]["missing_real_odds_snapshot"] >= 1
+
+        feature = FixtureFeatureSnapshot(fixture_id=fixture.id, sport="football", feature_version="lineage-test-v1", data_cutoff_at=now - timedelta(minutes=5), values={"home_elo": 1500}, data_quality={"overall": 90, "history_count": 5})
+        db.add(feature)
+        db.flush()
+        real_odds = OddsSnapshot(fixture_id=fixture.id, provider="the-odds-api", source_event_id="event-lineage", bookmaker="Real Book", market_family="1x2", market_type="1x2", period="full_game", participant="none", selection="home", decimal_odds=1.8, market_status="open", is_live=False, settlement_semantics="full_game", observed_at=now, provider_updated_at=now, payload={})
+        db.add(real_odds)
+        db.commit()
+
+        incomplete = optimizer.candidate_pool(db, request)
+        assert not incomplete.candidates
+        assert incomplete.diagnostics["rejection_reasons"]["feature_version_not_linked"] >= 1
+
+        prediction.features_version = feature.feature_version
+        db.commit()
+        linked = optimizer.candidate_pool(db, request)
+        assert linked.candidates
+
+        model = db.get(ModelVersion, prediction.model_version_id)
+        model.status = "candidate"
+        db.commit()
+        unapproved = optimizer.candidate_pool(db, request)
+        assert not unapproved.candidates
+        assert unapproved.diagnostics["rejection_reasons"]["model_not_approved"] >= 1
 
 
 def test_buildable_search_never_mixes_bookmakers_when_cross_book_prices_are_better():

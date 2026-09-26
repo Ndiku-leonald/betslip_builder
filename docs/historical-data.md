@@ -16,7 +16,7 @@ python scripts/backfill_real_football.py --league 39 --league 140 --season 2024 
 
 Use `--dry-run`, narrow date ranges and `--max-requests` before a real backfill. The command summary separates logical operations, actual external requests, and cache hits. A retry is a real provider request and is charged to quota; cache hits are not. The provider request budget is applied before each retry, so `--max-requests` caps outbound attempts. API-Sports daily quota boundaries are UTC. Do not run a large backfill in CI or during local development without an explicit budget.
 
-Football team statistics are normalized only when supplied by the provider. Basketball team statistics use the documented `games/statistics/teams` endpoint; player statistics are a separate capability using `games/statistics/players`. Unsupported or uncovered data is represented as unavailable, never fabricated.
+Football team statistics are normalized only when supplied by the provider. API-Football fixture-detail responses wrap team statistics under `response[0].statistics`; the normalizer unwraps that shape and also accepts flat team-stat responses. Basketball team statistics use the documented `games/statistics/teams` endpoint; player statistics are a separate capability using `games/statistics/players`. Unsupported or uncovered data is represented as unavailable, never fabricated.
 
 The league-season command requires an explicit league list and a request cap. It intentionally omits match statistics; statistics must be requested separately with an additional budget because one stats request is charged per fixture.
 

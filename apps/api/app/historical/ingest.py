@@ -27,6 +27,11 @@ def _integer(value: Any) -> int | None:
 
 def normalize_football_stats(payload: dict[str, Any]) -> list[dict[str, Any]]:
     response = payload.get("response", [])
+    # API-Football's fixture-detail endpoint wraps the two team-stat blocks
+    # inside response[0].statistics. Keep accepting the flat response shape
+    # used by other football-stat endpoints and existing cached payloads.
+    if len(response) == 1 and isinstance(response[0], dict) and isinstance(response[0].get("statistics"), list) and ("fixture" in response[0] or "teams" in response[0]):
+        response = response[0]["statistics"]
     result = []
     for item in response:
         team_id = str(item.get("team", {}).get("id"))

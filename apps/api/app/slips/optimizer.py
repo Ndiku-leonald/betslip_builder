@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.live.service import LiveIntelligenceService
 from app.markets.storage import latest_market_snapshots
 from app.markets.value import MarketValueService, market_freshness, market_group_key
-from app.models import Competition, Fixture, OddsSnapshot, Prediction, Slip, SlipLeg, Sport, Team
+from app.models import Competition, Fixture, FixtureFeatureSnapshot, ModelVersion, OddsSnapshot, Prediction, Slip, SlipLeg, Sport, Team
 from app.odds.ontology import NormalizedMarket
 from app.providers.reliability import source_reliability
 from app.slips.config import MAX_BEAM_WIDTH, MAX_CANDIDATES_PER_FIXTURE, MAX_CANDIDATES_PER_GROUP, PROFILE_CONFIG, ProfileConfig
@@ -137,6 +137,41 @@ class SlipOptimizer:
                 selected[key] = row
         return sorted(selected.values(), key=lambda item: (item.observed_at or item.created_at, item.id), reverse=True)
 
+    @staticmethod
+    def _real_lineage_reasons(db: Session, fixture: Fixture, prediction: Prediction | None, snapshots: list[OddsSnapshot]) -> list[str]:
+        """Return hard failures for the real-data recommendation lineage.
+
+        A real-only recommendation must be traceable from a non-synthetic
+        canonical fixture through a persisted pre-match feature snapshot and a
+        champion model prediction to at least one non-synthetic odds snapshot.
+        """
+        reasons: list[str] = []
+        if not fixture.provider or str(fixture.provider).startswith("synthetic") or not fixture.provider_fixture_id:
+            reasons.append("non_canonical_fixture")
+        feature = db.scalar(select(FixtureFeatureSnapshot).where(FixtureFeatureSnapshot.fixture_id == fixture.id).order_by(FixtureFeatureSnapshot.data_cutoff_at.desc(), FixtureFeatureSnapshot.id.desc()).limit(1))
+        if feature is None:
+            reasons.append("missing_feature_snapshot")
+        elif fixture.kickoff_at is not None and _utc(feature.data_cutoff_at) > _utc(fixture.kickoff_at):
+            reasons.append("feature_after_kickoff")
+        if prediction is None:
+            reasons.append("missing_prediction")
+        else:
+            if (prediction.payload or {}).get("available", True) is False:
+                reasons.append("prediction_unavailable")
+            version = db.get(ModelVersion, prediction.model_version_id) if prediction.model_version_id else None
+            if version is None or str(version.status).casefold() != "champion":
+                reasons.append("model_not_approved")
+            if feature is not None and prediction.features_version != feature.feature_version:
+                reasons.append("feature_version_not_linked")
+            if prediction.data_cutoff_at is None:
+                reasons.append("missing_prediction_cutoff")
+            elif fixture.kickoff_at is not None and _utc(prediction.data_cutoff_at) > _utc(fixture.kickoff_at):
+                reasons.append("prediction_after_kickoff")
+        real_odds = [item for item in snapshots if item.provider and not str(item.provider).startswith("synthetic") and not bool((item.payload or {}).get("synthetic"))]
+        if not real_odds:
+            reasons.append("missing_real_odds_snapshot")
+        return reasons
+
     def _prematch_values(self, db: Session, fixture: Fixture, snapshots: list[OddsSnapshot], prediction: Prediction | None) -> list[dict]:
         # These are the same Stage Three helpers used by the market-value endpoints.
         from app.main import _model_market_reliability, _model_probability_for_snapshot, _stored_consensus
@@ -189,6 +224,14 @@ class SlipOptimizer:
             prediction = None if is_live_fixture else self._latest_valid_prematch_prediction(db, fixture.id)
             snapshots = latest_market_snapshots(db, fixture.id, live_only=is_live_fixture) if is_live_fixture else self._prematch_snapshots(db, fixture.id)
             if not is_live_fixture: snapshots = [item for item in snapshots if not item.is_live]
+            if params.get("real_only"):
+                lineage_reasons = self._real_lineage_reasons(db, fixture, prediction, snapshots)
+                if lineage_reasons:
+                    diagnostics["candidates_rejected"] += 1
+                    for reason in lineage_reasons:
+                        diagnostics["rejection_reasons"][reason] = diagnostics["rejection_reasons"].get(reason, 0) + 1
+                    if len(exclusions) < 100: exclusions.append({"fixture_id": fixture.id, "selection": None, "reasons": lineage_reasons})
+                    continue
             if not snapshots: continue
             if is_live_fixture:
                 live_result = self.live_service.markets(db, fixture.id, profile=profile_name, persist=False)

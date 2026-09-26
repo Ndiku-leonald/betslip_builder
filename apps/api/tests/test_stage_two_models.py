@@ -158,6 +158,12 @@ def test_historical_statistics_are_provider_specific_and_normalized():
     assert "statistics" not in basketball[0]
 
 
+def test_fixture_detail_statistics_are_unwrapped_before_normalization():
+    rows = normalize_football_stats({"response": [{"fixture": {"id": 1208021}, "teams": {"home": {"id": 33}, "away": {"id": 36}}, "statistics": [{"team": {"id": 33}, "statistics": [{"type": "Total Shots", "value": 12}]}, {"team": {"id": 36}, "statistics": [{"type": "Total Shots", "value": 8}]}]}]})
+    assert [row["provider_team_id"] for row in rows] == ["33", "36"]
+    assert [row["shots"] for row in rows] == [12, 8]
+
+
 def test_feature_engine_is_strictly_pre_match_and_chronological():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}); Base.metadata.create_all(engine)
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)

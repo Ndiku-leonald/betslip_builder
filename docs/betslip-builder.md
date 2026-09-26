@@ -4,9 +4,11 @@ Stage Five adds a bounded, analytical target-odds optimizer on top of the canoni
 
 ## Candidate flow
 
-`Fixture -> latest canonical OddsSnapshot -> Stage Two prediction -> Stage Three value/freshness/compatibility -> Stage Four live gate (live only) -> centralized Stage Five gate -> bookmaker-grouped optimizer`
+`Fixture -> latest canonical OddsSnapshot -> linked feature snapshot -> champion-backed Stage Two prediction -> Stage Three value/freshness/compatibility -> Stage Four live gate (live only) -> centralized Stage Five gate -> bookmaker-grouped optimizer`
 
 The builder uses the latest valid snapshot for each canonical fixture/market/line/settlement identity. Pre-match candidates use Stage Three valuation. Live candidates are produced by `LiveIntelligenceService.markets`, which preserves the live state, price freshness and recommendation gates. Finished fixtures, suspended/closed/unavailable markets, stale prices, invalid odds, missing model probabilities, unsupported settlement semantics, provider conflicts, unacceptable quality/confidence, and unaccepted calibration are excluded with diagnostic reasons.
+
+When `real_only=true`, the optimizer also requires a non-synthetic canonical provider fixture, a persisted feature snapshot linked by feature version, a persisted prediction whose model version is currently `champion`, and a non-synthetic odds snapshot. Missing or broken lineage is a hard rejection and cannot be bypassed by a lower profile or a higher target tolerance.
 
 ## Profiles and search
 

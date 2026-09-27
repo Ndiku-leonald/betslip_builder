@@ -9,8 +9,9 @@ RUN useradd --create-home --uid 10001 slipiq
 WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY apps/api /app
-RUN chown -R slipiq:slipiq /app
+RUN chmod 0555 /app/start-render.sh \
+    && chown -R slipiq:slipiq /app
 USER slipiq
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('PORT', '8000') + '/livez', timeout=3)"
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers $WEB_CONCURRENCY"]
+CMD ["/app/start-render.sh"]

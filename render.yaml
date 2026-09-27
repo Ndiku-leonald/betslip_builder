@@ -11,9 +11,7 @@ services:
     dockerfilePath: ./apps/api/Dockerfile
     dockerContext: .
     healthCheckPath: /health
-    dockerCommand: >-
-      sh -c 'alembic -c alembic.ini upgrade head &&
-      exec uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --workers "$WEB_CONCURRENCY"'
+    dockerCommand: /app/start-render.sh
     envVars:
       - key: APP_ENV
         value: production

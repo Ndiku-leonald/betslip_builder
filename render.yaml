@@ -178,4 +178,3 @@ databases:
     region: frankfurt
     plan: free
     postgresMajorVersion: "16"
-    diskSizeGB: 1

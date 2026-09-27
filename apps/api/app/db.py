@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
+from app.paths import project_root
 
 
 class Base(DeclarativeBase):
@@ -13,8 +14,8 @@ class Base(DeclarativeBase):
 
 def resolve_database_url(url: str) -> str:
     if url.startswith("sqlite:///./"):
-        project_root = Path(__file__).resolve().parents[3]
-        return f"sqlite:///{(project_root / url.removeprefix('sqlite:///./')).as_posix()}"
+        root = project_root(Path(__file__))
+        return f"sqlite:///{(root / url.removeprefix('sqlite:///./')).as_posix()}"
     return url
 
 

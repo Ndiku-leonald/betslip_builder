@@ -10,6 +10,7 @@ from app.db import SessionLocal
 from app.evaluation.backtest import _outcome, walk_forward
 from app.evaluation.splits import chronological_split
 from app.models import BacktestPrediction, BacktestRun, ModelVersion, TrainingRun
+from app.paths import project_root
 from app.prediction.basketball import BasketballExpectedScoreModel
 from app.prediction.football import FootballPoissonModel
 from app.training.dataset import build_dataset
@@ -47,7 +48,7 @@ def train_candidate(db, sport: str, *, score_method: str = "poisson", seed: int 
     metrics = _jsonable({"market_families": backtest["metrics"].get("market_families", {}), "markets": backtest["metrics"].get("markets", {}), "multiclass_1x2_brier": backtest["metrics"].get("multiclass_1x2_brier"), "multiclass_1x2_log_loss": backtest["metrics"].get("multiclass_1x2_log_loss"), "baselines": backtest["metrics"].get("baselines", {}), "baseline_comparability": [fold["comparability"] for fold in backtest.get("baseline_folds", [])], "folds": backtest.get("folds", []), "split": split_metadata})
     version = ModelVersion(name=model.name, version=version_name, sport=sport, algorithm=parameters.get("algorithm"), trained_at=now, training_start=train_rows[0].data_cutoff_at, training_end=train_rows[-1].data_cutoff_at, validation_start=validation_rows[0].data_cutoff_at if validation_rows else None, validation_end=validation_rows[-1].data_cutoff_at if validation_rows else None, feature_version=feature_version or ("basketball_features_v1" if sport == "basketball" else "football_features_v1"), parameters=parameters, metrics=metrics, sample_count=len(rows), status="candidate")
     db.add(version); db.flush()
-    artifact_root = Path(__file__).resolve().parents[4] / "artifacts"
+    artifact_root = project_root(Path(__file__)) / "artifacts"
     artifact_dir = artifact_root / "models"; artifact_dir.mkdir(parents=True, exist_ok=True); artifact_path = artifact_dir / f"{version_name.replace('/', '_')}.json"; artifact_path.write_text(json.dumps(parameters, indent=2), encoding="utf-8"); version.artifact_path = f"models/{artifact_path.name}"
     db.add(TrainingRun(model_version_id=version.id, sport=sport, feature_version=version.feature_version, training_start=version.training_start, training_end=version.training_end, validation_start=version.validation_start, validation_end=version.validation_end, sample_count=len(train_rows), rows_excluded=len(rows) - len(train_rows), seed=seed, parameters=parameters, metrics=metrics))
     if backtest["predictions"]:

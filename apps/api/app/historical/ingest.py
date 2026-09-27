@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Fixture, TeamMatchStatistic
+from app.paths import project_root
 from app.providers.api_sports import ApiSportsProvider
 from app.providers.base import NormalizedFixture
 from app.services.ingestion import ingest_fixtures
@@ -83,7 +84,7 @@ def store_statistics(db: Session, fixture: Fixture, normalized: NormalizedFixtur
 
 
 def checkpoint_path(sport: str, league: str | None, season: str | None) -> Path:
-    root = Path(__file__).resolve().parents[3] / "artifacts" / "checkpoints"; root.mkdir(parents=True, exist_ok=True)
+    root = project_root(Path(__file__)) / "artifacts" / "checkpoints"; root.mkdir(parents=True, exist_ok=True)
     safe = "_".join(str(x or "all").replace("/", "-") for x in (sport, league, season))
     return root / f"{safe}.json"
 

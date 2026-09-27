@@ -5,9 +5,27 @@ from typing import Any, Literal
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.paths import project_root
+
+
+def discover_env_file(module_file: str | Path | None = None) -> Path | None:
+    """Find an optional local dotenv file without assuming a directory depth."""
+    source = Path(module_file or __file__).resolve()
+    candidates = [Path.cwd() / ".env", project_root(source) / ".env"]
+    candidates.extend(parent / ".env" for parent in source.parents)
+    seen: set[Path] = set()
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            return candidate
+    return None
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=Path(__file__).resolve().parents[3] / ".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=discover_env_file(), extra="ignore")
     app_env: Literal["development", "test", "production"] = "development"
     app_process_role: Literal["web", "worker"] = "web"
     log_level: str = "INFO"

@@ -12,7 +12,19 @@ branch_labels = None
 depends_on = None
 
 
+def _widen_postgresql_version_table() -> None:
+    if op.get_bind().dialect.name == "postgresql":
+        op.alter_column(
+            "alembic_version",
+            "version_num",
+            existing_type=sa.String(length=32),
+            type_=sa.String(length=255),
+            existing_nullable=False,
+        )
+
+
 def upgrade() -> None:
+    _widen_postgresql_version_table()
     op.add_column("model_versions", sa.Column("sport", sa.String(30), nullable=True))
     op.add_column("model_versions", sa.Column("algorithm", sa.String(80), nullable=True))
     op.add_column("model_versions", sa.Column("trained_at", sa.DateTime(timezone=True), nullable=True))

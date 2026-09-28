@@ -84,7 +84,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f apps/api/Dockerfile .
-      - run: docker build -f apps/web/Dockerfile .
+      - name: Build frontend image
+        run: docker build --build-arg NEXT_PUBLIC_API_URL=https://slipiq-staging-api.onrender.com -f apps/web/Dockerfile -t slipiq-web-smoke .
+      - name: Smoke test frontend container
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_name=slipiq-web-smoke
+          host_port=18080
+          trap 'docker logs "$container_name" || true; docker rm -f "$container_name" >/dev/null 2>&1 || true' EXIT
+
+          docker run -d --name "$container_name" \
+            -e PORT=10000 \
+            -e NEXT_PUBLIC_API_URL=https://slipiq-staging-api.onrender.com \
+            -p "$host_port:10000" \
+            slipiq-web-smoke >/dev/null
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error "http://127.0.0.1:${host_port}/" >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "Frontend container did not return HTTP 200 for /" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          for route in / /fixtures /models /value /builder /live /sources; do
+            curl --fail --silent --show-error "http://127.0.0.1:${host_port}${route}" >/dev/null
+          done
+
+          test "$(docker inspect -f '{{.State.Running}}' "$container_name")" = "true"
 
   secret-scan:
     runs-on: ubuntu-latest

@@ -155,6 +155,7 @@ services:
     autoDeployTrigger: checksPass
     dockerfilePath: ./apps/web/Dockerfile
     dockerContext: .
+    dockerCommand: /app/start-render.sh
     healthCheckPath: /
     envVars:
       - key: NEXT_PUBLIC_API_URL

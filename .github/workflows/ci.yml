@@ -24,6 +24,40 @@ jobs:
       - run: bandit -r app -lll
       - run: pip-audit -r requirements.txt
 
+  migrations-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: slipiq
+          POSTGRES_PASSWORD: slipiq-ci
+          POSTGRES_DB: slipiq
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U slipiq -d slipiq"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: apps/api
+    env:
+      DATABASE_URL: postgresql+psycopg://slipiq:slipiq-ci@localhost:5432/slipiq
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Upgrade PostgreSQL schema
+        run: alembic -c alembic.ini upgrade head
+      - name: Downgrade PostgreSQL schema
+        run: alembic -c alembic.ini downgrade base
+      - name: Re-upgrade PostgreSQL schema
+        run: alembic -c alembic.ini upgrade head
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

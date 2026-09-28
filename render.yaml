@@ -39,7 +39,7 @@ services:
       - key: ENABLE_SCHEDULED_LIVE_ODDS
         value: "false"
       - key: ALLOWED_ORIGINS
-        sync: false
+        value: https://slipiq-staging-web.onrender.com
       - key: TRUSTED_HOSTS
         fromService:
           name: slipiq-staging-api

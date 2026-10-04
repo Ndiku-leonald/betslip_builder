@@ -35,7 +35,7 @@ from app.odds.ontology import NormalizedMarket
 from app.providers.reliability import source_reliability, SOURCE_ROLES
 from app.quota import QuotaManager
 from app.quota_store import PersistentQuotaStore
-from app.schemas import ApiFootballStatusOut, DetailOut, FixtureOut, IngestionBootstrapRequest, LiveMarketResultOut, LivePredictionOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut, SlipBuildOut, SlipBuildRequest
+from app.schemas import ApiFootballStatusOut, DetailOut, FixtureOut, FootballDataStatusOut, IngestionBootstrapRequest, LiveMarketResultOut, LivePredictionOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut, SlipBuildOut, SlipBuildRequest
 from app.live.service import LiveIntelligenceService
 from app.live.persistence import latest_live_match_snapshot, persist_live_match_snapshot, state_for_fixture
 from app.live.state import normalize_basketball_live_state, normalize_football_live_state, state_from_fixture
@@ -1024,6 +1024,12 @@ async def api_football_status(_admin: None = Depends(require_admin)) -> dict:
             },
         )
     return result
+
+
+@app.get("/admin/providers/football-data/status", response_model=FootballDataStatusOut)
+async def football_data_status(_admin: None = Depends(require_admin)) -> dict:
+    """Return one safe, isolated football-data.org capability diagnostic."""
+    return await football_data.status_diagnostic()
 
 
 @app.post("/admin/ingestion/bootstrap")

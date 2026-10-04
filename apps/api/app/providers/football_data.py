@@ -25,6 +25,18 @@ class FootballDataError(RuntimeError):
         self.status_code = status_code
 
 
+def _safe_header_int(headers: Any, name: str, *, maximum: int = 2_147_483_647) -> int | None:
+    """Read a documented numeric response header without exposing its value raw."""
+    value = headers.get(name)
+    if value is None:
+        return None
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if 0 <= parsed <= maximum else None
+
+
 def _status(value: str | None) -> str:
     return {
         "TIMED": "scheduled",
@@ -101,6 +113,96 @@ class FootballDataProvider:
         self.last_rate_limit_remaining: int | None = None
         self.calls_today = 0
         self.last_cache_hit = False
+
+    @staticmethod
+    def _diagnostic_result(*, configured: bool, reachable: bool, authenticated: bool | None, available: bool, http_status: int | None, classification: str, reason_code: str, rate_limit_remaining: int | None = None, rate_limit_reset_seconds: int | None = None) -> dict[str, Any]:
+        return {
+            "provider": "football-data.org",
+            "configured": configured,
+            "reachable": reachable,
+            "authenticated": authenticated,
+            "available": available,
+            "http_status": http_status,
+            "classification": classification,
+            "reason_code": reason_code,
+            "rate_limit_remaining": rate_limit_remaining,
+            "rate_limit_reset_seconds": rate_limit_reset_seconds,
+        }
+
+    async def status_diagnostic(self) -> dict[str, Any]:
+        """Perform one safe, isolated authentication/capability check.
+
+        The v4 ``/matches`` list is used because the official API policy says
+        unauthenticated clients can access only area and competition lists.
+        This method deliberately bypasses cache, quota accounting, ingestion
+        events, provider health, and circuit state. It also never returns the
+        response body or provider error text.
+        """
+        if not self.configured:
+            return self._diagnostic_result(
+                configured=False,
+                reachable=False,
+                authenticated=False,
+                available=False,
+                http_status=None,
+                classification="not_configured",
+                reason_code="provider_not_configured",
+            )
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
+                response = await client.get(
+                    f"{self.base_url}/matches",
+                    headers={"X-Auth-Token": self.key or ""},
+                )
+        except httpx.TimeoutException:
+            return self._diagnostic_result(
+                configured=True,
+                reachable=False,
+                authenticated=None,
+                available=False,
+                http_status=None,
+                classification="transport_failure",
+                reason_code="provider_timeout",
+            )
+        except httpx.HTTPError:
+            return self._diagnostic_result(
+                configured=True,
+                reachable=False,
+                authenticated=None,
+                available=False,
+                http_status=None,
+                classification="transport_failure",
+                reason_code="provider_request_failed",
+            )
+
+        rate_limit_remaining = _safe_header_int(response.headers, "X-RequestsAvailable")
+        rate_limit_reset_seconds = _safe_header_int(response.headers, "X-RequestCounter-Reset", maximum=86_400)
+        status_code = response.status_code
+        if status_code == 401:
+            return self._diagnostic_result(configured=True, reachable=True, authenticated=False, available=False, http_status=status_code, classification="authentication_failure", reason_code="authentication_failed", rate_limit_remaining=rate_limit_remaining, rate_limit_reset_seconds=rate_limit_reset_seconds)
+        if status_code == 403:
+            # This check has no competition parameter, so a 403 is not
+            # misreported as a competition restriction. The official API docs
+            # describe this response as a restricted resource, including paid
+            # plan access.
+            return self._diagnostic_result(configured=True, reachable=True, authenticated=None, available=False, http_status=status_code, classification="plan_restricted", reason_code="restricted_resource", rate_limit_remaining=rate_limit_remaining, rate_limit_reset_seconds=rate_limit_reset_seconds)
+        if status_code == 429:
+            classification = "quota_exhausted" if rate_limit_remaining == 0 else "rate_limited"
+            reason_code = "rate_limit_exhausted" if classification == "quota_exhausted" else "provider_rate_limited"
+            return self._diagnostic_result(configured=True, reachable=True, authenticated=True, available=False, http_status=status_code, classification=classification, reason_code=reason_code, rate_limit_remaining=rate_limit_remaining, rate_limit_reset_seconds=rate_limit_reset_seconds)
+        if status_code >= 500:
+            return self._diagnostic_result(configured=True, reachable=True, authenticated=None, available=False, http_status=status_code, classification="provider_unavailable", reason_code="provider_http_5xx", rate_limit_remaining=rate_limit_remaining, rate_limit_reset_seconds=rate_limit_reset_seconds)
+        if status_code >= 400:
+            return self._diagnostic_result(configured=True, reachable=True, authenticated=None, available=False, http_status=status_code, classification="provider_error", reason_code=f"provider_http_{status_code}", rate_limit_remaining=rate_limit_remaining, rate_limit_reset_seconds=rate_limit_reset_seconds)
+
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            payload = None
+        if not isinstance(payload, dict) or not isinstance(payload.get("matches"), list):
+            return self._diagnostic_result(configured=True, reachable=True, authenticated=True, available=False, http_status=status_code, classification="malformed_response", reason_code="matches_payload_malformed", rate_limit_remaining=rate_limit_remaining, rate_limit_reset_seconds=rate_limit_reset_seconds)
+        return self._diagnostic_result(configured=True, reachable=True, authenticated=True, available=True, http_status=status_code, classification="successful_usable_response", reason_code="authenticated_matches_response", rate_limit_remaining=rate_limit_remaining, rate_limit_reset_seconds=rate_limit_reset_seconds)
 
     async def _request(self, path: str, params: dict[str, Any] | None = None, *, ttl: int = 300) -> dict[str, Any]:
         self.last_cache_hit = False

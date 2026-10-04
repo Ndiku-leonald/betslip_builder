@@ -64,6 +64,19 @@ class ApiFootballStatusOut(BaseModel):
     requests: ApiFootballRequestStatus
 
 
+class FootballDataStatusOut(BaseModel):
+    provider: str
+    configured: bool
+    reachable: bool
+    authenticated: bool | None
+    available: bool
+    http_status: int | None
+    classification: str
+    reason_code: str
+    rate_limit_remaining: int | None = None
+    rate_limit_reset_seconds: int | None = None
+
+
 class IngestionBootstrapRequest(BaseModel):
     sport: Literal["football", "basketball"] = "football"
     competition: str | None = None

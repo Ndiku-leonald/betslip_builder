@@ -360,6 +360,7 @@ class ProviderHealth(TimestampMixin, Base):
     provider: Mapped[str] = mapped_column(String(60), unique=True)
     configured: Mapped[bool] = mapped_column(Boolean, default=False)
     healthy: Mapped[bool] = mapped_column(Boolean, default=False)
+    state: Mapped[str] = mapped_column(String(40), default="unknown")
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)

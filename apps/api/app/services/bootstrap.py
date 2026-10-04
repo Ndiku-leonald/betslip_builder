@@ -50,6 +50,7 @@ class BootstrapResult:
     providers_attempted: list[str] = field(default_factory=list)
     providers_succeeded: list[str] = field(default_factory=list)
     providers_unavailable: list[dict[str, str]] = field(default_factory=list)
+    provider_state: str | None = None
     competitions_written: int = 0
     teams_written: int = 0
     fixtures_written: int = 0
@@ -71,6 +72,7 @@ class BootstrapResult:
             "providers_attempted": self.providers_attempted,
             "providers_succeeded": self.providers_succeeded,
             "providers_unavailable": self.providers_unavailable,
+            "provider_state": self.provider_state,
             "competitions_written": self.competitions_written,
             "teams_written": self.teams_written,
             "fixtures_written": self.fixtures_written,
@@ -86,9 +88,15 @@ class BootstrapResult:
         }
 
 
-def provider_state(*, configured: bool, status_code: int | None = None, error: str | None = None) -> str:
+def provider_state(*, configured: bool, status_code: int | None = None, error: str | None = None, category: str | None = None) -> str:
     if not configured:
         return "missing"
+    if category:
+        return category
+    text = (error or "").casefold()
+    for category_name in ("plan_restricted", "entitlement_unavailable", "quota_exhausted", "rate_limited", "temporarily_unavailable", "no_data"):
+        if category_name in text:
+            return category_name
     if status_code == 403:
         return "entitlement_unavailable"
     if status_code == 429:
@@ -113,7 +121,7 @@ def _date_range(scope: BootstrapScope, today: date) -> list[str]:
 
 
 def _is_terminal_provider_error(exc: ProviderError) -> bool:
-    return exc.status_code in {401, 403, 429}
+    return exc.terminal or exc.status_code in {401, 403, 429}
 
 
 def _odds_sport_key(scope: BootstrapScope) -> str | None:
@@ -144,6 +152,7 @@ async def run_bootstrap(
     if not provider.configured:
         result.status = "failed"
         result.error_category = "missing"
+        result.provider_state = "missing"
         result.providers_unavailable.append({"provider": provider.name, "state": "missing"})
         result.warnings.append("Primary provider credentials are not configured.")
         return result
@@ -164,7 +173,8 @@ async def run_bootstrap(
         except ProviderError as exc:
             result.external_requests += sum(1 for event in provider.last_request_events if event.get("external_request"))
             record_provider_event(provider, "bootstrap/fixtures", exc.status_code, str(exc))
-            state = provider_state(configured=True, status_code=exc.status_code, error=str(exc))
+            state = provider_state(configured=True, status_code=exc.status_code, error=str(exc), category=exc.category)
+            result.provider_state = state
             result.providers_unavailable.append({"provider": provider.name, "state": state})
             result.error_category = state
             result.warnings.append(f"{provider.name} unavailable during fixture ingestion ({state}).")
@@ -178,6 +188,7 @@ async def run_bootstrap(
         result.teams_written = max(0, _count(db, Team) - before[Team])
     elif not result.providers_unavailable:
         result.warnings.append("Provider returned no fixtures for the bounded period.")
+        result.provider_state = "no_data"
 
     if scope.include_statistics and items:
         stats_candidates = [item for item in items if item.status == "finished"][:MAX_STATISTICS_FIXTURES]
@@ -193,7 +204,7 @@ async def run_bootstrap(
             except ProviderError as exc:
                 result.external_requests += sum(1 for event in provider.last_request_events if event.get("external_request"))
                 record_provider_event(provider, "bootstrap/statistics", exc.status_code, str(exc))
-                state = provider_state(configured=True, status_code=exc.status_code, error=str(exc))
+                state = provider_state(configured=True, status_code=exc.status_code, error=str(exc), category=exc.category)
                 result.warnings.append(f"Statistics unavailable for one fixture ({state}); stored results remain valid.")
                 if _is_terminal_provider_error(exc):
                     break
@@ -212,8 +223,8 @@ async def run_bootstrap(
     if not db.scalar(select(func.count()).select_from(FixtureFeatureSnapshot).where(FixtureFeatureSnapshot.sport == scope.sport)):
         result.warnings.append("No feature snapshots were generated from the bounded provider data.")
     result.warnings.append("Training and production prediction generation were not run; model promotion remains explicit and gated.")
-    if result.error_category and not result.fixtures_written:
-        result.status = "failed"
+    if result.error_category:
+        result.status = "partial" if result.fixtures_written else "failed"
     return result
 
 

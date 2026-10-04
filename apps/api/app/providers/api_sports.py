@@ -15,11 +15,26 @@ from app.quota import QuotaManager
 logger = logging.getLogger(__name__)
 
 
+def classify_api_error(value: Any) -> str:
+    """Classify API-Sports response-level errors without exposing raw text."""
+    text = str(value).casefold()
+    if any(token in text for token in ("quota", "rate limit", "rate-limit", "too many", "requests limit", "daily limit", "remaining")):
+        return "quota_exhausted"
+    if any(token in text for token in ("subscription", "plan", "not subscribed", "not available on your plan", "endpoint is not available", "access denied")):
+        return "plan_restricted"
+    if any(token in text for token in ("unauthorized", "authentication", "invalid key", "api key")):
+        return "error"
+    return "error"
+
+
 class ProviderError(RuntimeError):
-    def __init__(self, provider: str, message: str, status_code: int | None = None) -> None:
+    def __init__(self, provider: str, message: str, status_code: int | None = None, *, category: str | None = None, terminal: bool = False, external_request: bool | None = None) -> None:
         super().__init__(message)
         self.provider = provider
         self.status_code = status_code
+        self.category = category
+        self.terminal = terminal
+        self.external_request = external_request
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -122,6 +137,7 @@ class ApiSportsProvider:
         self.last_observed_at: datetime | None = None
         self.last_request_events: list[dict[str, Any]] = []
         self.last_quota_blocked = False
+        self.last_circuit_blocked = False
         self.request_budget: int | None = None
         self.calls_today = 0
         self.connect_timeout = connect_timeout
@@ -151,6 +167,7 @@ class ApiSportsProvider:
         self.last_request_events = []
         self.last_error = None
         self.last_quota_blocked = False
+        self.last_circuit_blocked = False
 
     def _request_event(self, endpoint: str, *, status_code: int | None, latency_ms: float | None, rate_limit_remaining: int | None, error: str | None = None, external_request: bool = True, requested_at: datetime | None = None, usage_id: str | None = None) -> None:
         self.last_request_events.append({"endpoint": endpoint, "requested_at": requested_at or datetime.now(timezone.utc), "usage_id": usage_id, "status_code": status_code, "latency_ms": latency_ms, "rate_limit_remaining": rate_limit_remaining, "error": error, "cache_hit": False, "external_request": external_request})
@@ -165,10 +182,13 @@ class ApiSportsProvider:
         if not self.configured:
             self.last_error = "Provider not configured"
             self.last_status_code = None
-            raise ProviderError(self.name, "Provider not configured")
+            raise ProviderError(self.name, self.last_error, category="missing", terminal=True, external_request=False)
         if monotonic() < self.circuit_open_until:
             self.last_error = "Provider circuit is temporarily open"
-            raise ProviderError(self.name, self.last_error, 503)
+            self.last_status_code = 503
+            self.last_circuit_blocked = True
+            self._request_event(endpoint, status_code=503, latency_ms=0.0, rate_limit_remaining=None, error=self.last_error, external_request=False)
+            raise ProviderError(self.name, self.last_error, 503, category="temporarily_unavailable", terminal=True, external_request=False)
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         for attempt in range(self.retry_attempts):
             if self.request_budget is not None and self.request_budget <= 0:
@@ -176,14 +196,14 @@ class ApiSportsProvider:
                 self.last_status_code = 429
                 self.last_quota_blocked = True
                 self._request_event(endpoint, status_code=429, latency_ms=0.0, rate_limit_remaining=None, error=self.last_error, external_request=False)
-                raise ProviderError(self.name, self.last_error, 429)
+                raise ProviderError(self.name, self.last_error, 429, category="quota_exhausted", terminal=True, external_request=False)
             reservation = self.quota.reserve(self.name, endpoint)
             if reservation is None:
                 self.last_error = "Configured quota limit reached"
                 self.last_status_code = 429
                 self.last_quota_blocked = True
                 self._request_event(endpoint, status_code=429, latency_ms=0.0, rate_limit_remaining=None, error=self.last_error, external_request=False)
-                raise ProviderError(self.name, self.last_error, 429)
+                raise ProviderError(self.name, self.last_error, 429, category="quota_exhausted", terminal=True, external_request=False)
             started = perf_counter()
             requested_at = datetime.now(timezone.utc)
             if self.request_budget is not None: self.request_budget -= 1
@@ -216,16 +236,20 @@ class ApiSportsProvider:
                         self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
                         self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error)
                     self._record_failure()
-                    raise ProviderError(self.name, f"Provider returned HTTP {response.status_code}", response.status_code)
+                    category = "entitlement_unavailable" if response.status_code == 403 else "error" if response.status_code == 401 else "rate_limited" if response.status_code == 429 else "temporarily_unavailable"
+                    raise ProviderError(self.name, f"Provider returned HTTP {response.status_code}", response.status_code, category=category, terminal=response.status_code in {401, 403, 429})
                 payload = response.json()
                 errors = payload.get("errors") if isinstance(payload, dict) else None
                 if errors:
-                    message = "; ".join(f"{key}: {value}" for key, value in errors.items()) if isinstance(errors, dict) else str(errors)
+                    category = classify_api_error(errors)
+                    message = f"Provider API error ({category})"
                     self.last_error = message
                     self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=message)
                     self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=message)
-                    self._record_failure()
-                    raise ProviderError(self.name, message, response.status_code)
+                    # HTTP 200 plus an API-level error is a terminal semantic
+                    # response for this bounded operation, not a transport
+                    # failure. Do not trip the circuit breaker.
+                    raise ProviderError(self.name, message, response.status_code, category=category, terminal=True, external_request=True)
                 self.last_observed_at = datetime.now(timezone.utc)
                 self.last_success_at = self.last_observed_at
                 self.last_error = None

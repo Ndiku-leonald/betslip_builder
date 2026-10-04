@@ -96,10 +96,10 @@ def _record_usage(provider: ApiSportsProvider, endpoint: str, *, status_code: in
         events = list(provider.last_request_events)
         provider.last_request_events.clear()
         if not events:
-            events = [{"endpoint": endpoint, "status_code": status_code if status_code is not None else provider.last_status_code, "latency_ms": provider.last_latency_ms, "rate_limit_remaining": provider.last_rate_limit_remaining, "error": error, "cache_hit": provider.last_cache_hit, "external_request": not provider.last_quota_blocked and not provider.last_cache_hit and provider.configured}]
+            events = [{"endpoint": endpoint, "status_code": status_code if status_code is not None else provider.last_status_code, "latency_ms": provider.last_latency_ms, "rate_limit_remaining": provider.last_rate_limit_remaining, "error": error, "cache_hit": provider.last_cache_hit, "external_request": not provider.last_quota_blocked and not provider.last_circuit_blocked and not provider.last_cache_hit and provider.configured}]
         health = db.scalar(select(ProviderHealth).where(ProviderHealth.provider == provider.name))
         if health is None:
-            health = ProviderHealth(provider=provider.name, configured=provider.configured, healthy=False)
+            health = ProviderHealth(provider=provider.name, configured=provider.configured, healthy=False, state="unknown")
             db.add(health)
         for event in events:
             recorded_at = event.get("requested_at") or datetime.now(timezone.utc)
@@ -118,6 +118,7 @@ def _record_usage(provider: ApiSportsProvider, endpoint: str, *, status_code: in
                 usage.rate_limit_remaining = event["rate_limit_remaining"]
                 usage.error = event_error
             health.configured = provider.configured
+            health.state = provider_state(configured=provider.configured, status_code=effective_status, error=event_error)
             if not event["cache_hit"]:
                 health.last_latency_ms = event["latency_ms"]
                 if event_error or effective_status is None or effective_status >= 400:
@@ -155,15 +156,32 @@ def _record_generic_usage(provider: object, endpoint: str, status_code: int | No
             latest.error = error
         health = db.scalar(select(ProviderHealth).where(ProviderHealth.provider == name))
         if health is None:
-            health = ProviderHealth(provider=name, configured=configured, healthy=False)
+            health = ProviderHealth(provider=name, configured=configured, healthy=False, state="unknown")
             db.add(health)
         health.configured = configured
+        health.state = provider_state(configured=configured, status_code=status_code, error=error)
         health.healthy = configured and status_code is not None and status_code < 400 and not error
         health.last_error = error
         health.last_latency_ms = getattr(provider, "last_latency_ms", None)
         if health.healthy:
             health.last_success_at = now
         health.calls_today = int(db.scalar(select(func.count(ProviderUsage.id)).where(ProviderUsage.provider == name, ProviderUsage.requested_at >= _utc_day_start(), ProviderUsage.cache_hit.is_(False), ProviderUsage.external_request.is_(True))) or 0)
+        db.commit()
+
+
+def _set_provider_health_state(provider_name: str, state: str | None) -> None:
+    if not state:
+        return
+    with SessionLocal() as db:
+        health = db.scalar(select(ProviderHealth).where(ProviderHealth.provider == provider_name))
+        if health is None:
+            provider = next((item for item in [*providers.values(), football_data, secondary_football] if item is not None and item.name == provider_name), None)
+            health = ProviderHealth(provider=provider_name, configured=bool(provider and provider.configured), healthy=state in {"healthy", "no_data"}, state=state)
+            db.add(health)
+        else:
+            health.state = state
+            if state == "no_data":
+                health.healthy = True
         db.commit()
 
 
@@ -908,7 +926,7 @@ def provider_status(db: Session = Depends(get_db)) -> list[ProviderStatus]:
         health = db.scalar(select(ProviderHealth).where(ProviderHealth.provider == provider.name))
         if health is not None:
             latest = db.scalar(select(ProviderUsage).where(ProviderUsage.provider == provider.name).order_by(ProviderUsage.requested_at.desc()).limit(1))
-            state = provider_state(configured=provider.configured, status_code=latest.status_code if latest else None, error=latest.error if latest else health.last_error)
+            state = health.state if health.state and health.state != "unknown" else provider_state(configured=provider.configured, status_code=latest.status_code if latest else None, error=latest.error if latest else health.last_error)
             result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=provider.configured and health.healthy, state=state, last_success_at=health.last_success_at, last_error=health.last_error, latency_ms=health.last_latency_ms, calls_today=health.calls_today, capabilities=provider.capabilities))
             continue
         day_start = _utc_day_start()
@@ -975,6 +993,7 @@ async def ingestion_bootstrap(request: IngestionBootstrapRequest, _admin: None =
             result = await run_bootstrap(db, scope, provider=providers[scope.sport], odds_provider=odds_provider, record_provider_event=record_event)
         finally:
             db.close()
+        _set_provider_health_state(providers[scope.sport].name, result.provider_state)
         finished = datetime.now(timezone.utc)
         payload = {**result.as_dict(), "started_at": started, "finished_at": finished}
         _ingestion_status = payload

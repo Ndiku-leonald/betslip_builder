@@ -33,6 +33,10 @@ class ProviderStatus(BaseModel):
     state: str = "unknown"
     reason_code: str | None = None
     error_key: str | None = None
+    error_shape: str | None = None
+    error_entry_count: int | None = None
+    semantic_tags: list[str] | None = None
+    diagnostic_truncated: bool = False
     last_success_at: datetime | None
     last_error: str | None
     latency_ms: float | None

@@ -96,7 +96,7 @@ def _record_usage(provider: ApiSportsProvider, endpoint: str, *, status_code: in
         events = list(provider.last_request_events)
         provider.last_request_events.clear()
         if not events:
-            events = [{"endpoint": endpoint, "status_code": status_code if status_code is not None else provider.last_status_code, "latency_ms": provider.last_latency_ms, "rate_limit_remaining": provider.last_rate_limit_remaining, "error": error, "error_category": None, "reason_code": None, "error_key": None, "cache_hit": provider.last_cache_hit, "external_request": not provider.last_quota_blocked and not provider.last_circuit_blocked and not provider.last_cache_hit and provider.configured}]
+            events = [{"endpoint": endpoint, "status_code": status_code if status_code is not None else provider.last_status_code, "latency_ms": provider.last_latency_ms, "rate_limit_remaining": provider.last_rate_limit_remaining, "error": error, "error_category": None, "reason_code": None, "error_key": None, "error_shape": None, "error_entry_count": 0, "semantic_tags": [], "diagnostic_truncated": False, "cache_hit": provider.last_cache_hit, "external_request": not provider.last_quota_blocked and not provider.last_circuit_blocked and not provider.last_cache_hit and provider.configured}]
         health = db.scalar(select(ProviderHealth).where(ProviderHealth.provider == provider.name))
         if health is None:
             health = ProviderHealth(provider=provider.name, configured=provider.configured, healthy=False, state="unknown")
@@ -108,9 +108,13 @@ def _record_usage(provider: ApiSportsProvider, endpoint: str, *, status_code: in
             event_category = event.get("error_category")
             event_reason = event.get("reason_code")
             event_key = event.get("error_key")
+            event_shape = event.get("error_shape")
+            event_entry_count = event.get("error_entry_count", 0)
+            event_tags = event.get("semantic_tags", [])
+            event_truncated = bool(event.get("diagnostic_truncated", False))
             usage = db.get(ProviderUsage, event.get("usage_id")) if event.get("usage_id") else None
             if usage is None:
-                usage = ProviderUsage(id=event["usage_id"], provider=provider.name, endpoint=event["endpoint"], requested_at=recorded_at, status_code=effective_status, latency_ms=event["latency_ms"], cache_hit=event["cache_hit"], external_request=event["external_request"], rate_limit_remaining=event["rate_limit_remaining"], error=event_error, error_category=event_category, reason_code=event_reason, error_key=event_key) if event.get("usage_id") else ProviderUsage(provider=provider.name, endpoint=event["endpoint"], requested_at=recorded_at, status_code=effective_status, latency_ms=event["latency_ms"], cache_hit=event["cache_hit"], external_request=event["external_request"], rate_limit_remaining=event["rate_limit_remaining"], error=event_error, error_category=event_category, reason_code=event_reason, error_key=event_key)
+                usage = ProviderUsage(id=event["usage_id"], provider=provider.name, endpoint=event["endpoint"], requested_at=recorded_at, status_code=effective_status, latency_ms=event["latency_ms"], cache_hit=event["cache_hit"], external_request=event["external_request"], rate_limit_remaining=event["rate_limit_remaining"], error=event_error, error_category=event_category, reason_code=event_reason, error_key=event_key, error_shape=event_shape, error_entry_count=event_entry_count, semantic_tags=event_tags, diagnostic_truncated=event_truncated) if event.get("usage_id") else ProviderUsage(provider=provider.name, endpoint=event["endpoint"], requested_at=recorded_at, status_code=effective_status, latency_ms=event["latency_ms"], cache_hit=event["cache_hit"], external_request=event["external_request"], rate_limit_remaining=event["rate_limit_remaining"], error=event_error, error_category=event_category, reason_code=event_reason, error_key=event_key, error_shape=event_shape, error_entry_count=event_entry_count, semantic_tags=event_tags, diagnostic_truncated=event_truncated)
                 db.add(usage)
             else:
                 usage.requested_at = recorded_at
@@ -123,10 +127,18 @@ def _record_usage(provider: ApiSportsProvider, endpoint: str, *, status_code: in
                 usage.error_category = event_category
                 usage.reason_code = event_reason
                 usage.error_key = event_key
+                usage.error_shape = event_shape
+                usage.error_entry_count = event_entry_count
+                usage.semantic_tags = event_tags
+                usage.diagnostic_truncated = event_truncated
             health.configured = provider.configured
             health.state = event_category or provider_state(configured=provider.configured, status_code=effective_status, error=event_error)
             health.reason_code = event_reason
             health.error_key = event_key
+            health.error_shape = event_shape
+            health.error_entry_count = event_entry_count
+            health.semantic_tags = event_tags
+            health.diagnostic_truncated = event_truncated
             if not event["cache_hit"]:
                 health.last_latency_ms = event["latency_ms"]
                 if event_error or effective_status is None or effective_status >= 400:
@@ -158,7 +170,7 @@ def _record_generic_usage(provider: object, endpoint: str, status_code: int | No
         latest = db.scalar(select(ProviderUsage).where(ProviderUsage.provider == name).order_by(ProviderUsage.requested_at.desc()).limit(1))
         cache_hit = bool(getattr(provider, "last_cache_hit", False))
         if latest is None or latest.status_code is None or (now - (latest.requested_at.replace(tzinfo=timezone.utc) if latest.requested_at.tzinfo is None else latest.requested_at)).total_seconds() > 30:
-            latest = ProviderUsage(provider=name, endpoint=endpoint, requested_at=now, status_code=status_code, latency_ms=getattr(provider, "last_latency_ms", None), cache_hit=cache_hit, external_request=not cache_hit and status_code != 429, rate_limit_remaining=getattr(provider, "last_rate_limit_remaining", None), error=safe_error, error_category=None, reason_code=None, error_key=None)
+            latest = ProviderUsage(provider=name, endpoint=endpoint, requested_at=now, status_code=status_code, latency_ms=getattr(provider, "last_latency_ms", None), cache_hit=cache_hit, external_request=not cache_hit and status_code != 429, rate_limit_remaining=getattr(provider, "last_rate_limit_remaining", None), error=safe_error, error_category=None, reason_code=None, error_key=None, error_shape=None, error_entry_count=0, semantic_tags=[], diagnostic_truncated=False)
             db.add(latest)
         else:
             latest.status_code = status_code
@@ -939,7 +951,7 @@ def provider_status(db: Session = Depends(get_db)) -> list[ProviderStatus]:
         if health is not None:
             latest = db.scalar(select(ProviderUsage).where(ProviderUsage.provider == provider.name).order_by(ProviderUsage.requested_at.desc()).limit(1))
             state = health.state if health.state and health.state != "unknown" else provider_state(configured=provider.configured, status_code=latest.status_code if latest else None, error=latest.error if latest else health.last_error)
-            result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=provider.configured and health.healthy, state=state, reason_code=health.reason_code, error_key=health.error_key, last_success_at=health.last_success_at, last_error=health.last_error, latency_ms=health.last_latency_ms, calls_today=health.calls_today, capabilities=provider.capabilities))
+            result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=provider.configured and health.healthy, state=state, reason_code=health.reason_code, error_key=health.error_key, error_shape=health.error_shape, error_entry_count=health.error_entry_count, semantic_tags=health.semantic_tags, diagnostic_truncated=health.diagnostic_truncated, last_success_at=health.last_success_at, last_error=health.last_error, latency_ms=health.last_latency_ms, calls_today=health.calls_today, capabilities=provider.capabilities))
             continue
         day_start = _utc_day_start()
         usage = list(db.scalars(select(ProviderUsage).where(ProviderUsage.provider == provider.name).order_by(ProviderUsage.requested_at.desc()).limit(100)))
@@ -949,7 +961,7 @@ def provider_status(db: Session = Depends(get_db)) -> list[ProviderStatus]:
         current_error = latest.error if latest and latest.error else getattr(provider, "last_error", None)
         current_status = latest.status_code if latest else getattr(provider, "last_status_code", None)
         healthy = bool(successful and (latest is None or not latest.error)) if provider.name != "livescore-football" else bool(getattr(provider, "last_success_at", None) and not getattr(provider, "last_error", None))
-        result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=healthy, state=(latest.error_category if latest and latest.error_category else provider_state(configured=provider.configured, status_code=current_status, error=current_error)), reason_code=latest.reason_code if latest else None, error_key=latest.error_key if latest else None, last_success_at=successful.requested_at if successful else getattr(provider, "last_success_at", None), last_error=current_error, latency_ms=latest.latency_ms if latest else getattr(provider, "last_latency_ms", None), calls_today=int(calls_today) if provider.name != "livescore-football" else 0, capabilities=provider.capabilities))
+        result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=healthy, state=(latest.error_category if latest and latest.error_category else provider_state(configured=provider.configured, status_code=current_status, error=current_error)), reason_code=latest.reason_code if latest else None, error_key=latest.error_key if latest else None, error_shape=latest.error_shape if latest else None, error_entry_count=latest.error_entry_count if latest else None, semantic_tags=latest.semantic_tags if latest else None, diagnostic_truncated=latest.diagnostic_truncated if latest else False, last_success_at=successful.requested_at if successful else getattr(provider, "last_success_at", None), last_error=current_error, latency_ms=latest.latency_ms if latest else getattr(provider, "last_latency_ms", None), calls_today=int(calls_today) if provider.name != "livescore-football" else 0, capabilities=provider.capabilities))
     return result
 
 

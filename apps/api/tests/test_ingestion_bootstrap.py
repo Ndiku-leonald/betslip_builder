@@ -10,7 +10,7 @@ import app.main as main_module
 from app.cache import MemoryCache
 from app.db import Base
 from app.models import Competition, Fixture, FixtureFeatureSnapshot, ProviderHealth, ProviderUsage, Team
-from app.providers.api_sports import ApiSportsProvider, ProviderError
+from app.providers.api_sports import ApiSportsProvider, ProviderError, classify_api_error
 from app.providers.base import NormalizedFixture
 from app.quota import QuotaManager
 from app.schemas import IngestionBootstrapRequest
@@ -108,21 +108,21 @@ async def test_http_200_api_level_plan_error_is_terminal_without_opening_circuit
 
 
 @pytest.mark.parametrize(
-    ("error_payload", "expected_category", "expected_reason", "expected_key"),
+    ("error_payload", "expected_category", "expected_reason", "expected_key", "expected_shape"),
     [
-        ({"plan": "date outside subscription window; credential=must-not-leak"}, "plan_restricted", "date_outside_subscription_window", "plan"),
-        ({"quota": "daily requests limit reached"}, "quota_exhausted", "daily_quota_exhausted", "quota"),
-        ({"rateLimit": "too many requests"}, "rate_limited", "rate_limit_exceeded", "rate_limit"),
-        ({"token": "invalid api key"}, "authentication_failed", "invalid_api_key", "authentication"),
-        ({"date": "invalid date format"}, "invalid_parameter", "invalid_date", "date"),
-        ({"season": "season is required"}, "missing_parameter", "season_required", "season"),
-        ({"league": "invalid league"}, "invalid_parameter", "invalid_league", "league"),
-        ({"mystery": "opaque provider detail secret=must-not-leak"}, "provider_error", "unknown_provider_error", None),
-        (["unexpected provider error secret=must-not-leak"], "provider_error", "unknown_provider_error", None),
+        ({"plan": "date outside subscription window; credential=must-not-leak"}, "plan_restricted", "date_outside_subscription_window", "plan", "object"),
+        ({"quota": "daily requests limit reached"}, "quota_exhausted", "daily_quota_exhausted", "quota", "object"),
+        ({"rateLimit": "too many requests"}, "rate_limited", "rate_limit_exceeded", "rate_limit", "object"),
+        ({"token": "invalid api key"}, "authentication_failed", "invalid_api_key", "token", "object"),
+        ({"date": "invalid date format"}, "invalid_parameter", "invalid_date", "date", "object"),
+        ({"season": "season is required"}, "missing_parameter", "season_required", "season", "object"),
+        ({"league": "invalid league"}, "invalid_parameter", "invalid_league", "league", "object"),
+        ({"mystery": "opaque provider detail secret=must-not-leak"}, "provider_error", "unknown_provider_error", "unknown_key", "object"),
+        (["unexpected provider error secret=must-not-leak"], "provider_error", "unknown_provider_error", None, "list"),
     ],
 )
 @pytest.mark.asyncio
-async def test_http_200_error_shapes_produce_safe_structured_diagnostics(monkeypatch, error_payload, expected_category, expected_reason, expected_key):
+async def test_http_200_error_shapes_produce_safe_structured_diagnostics(monkeypatch, error_payload, expected_category, expected_reason, expected_key, expected_shape):
     import app.providers.api_sports as module
 
     class Response:
@@ -144,6 +144,8 @@ async def test_http_200_error_shapes_produce_safe_structured_diagnostics(monkeyp
     assert diagnostic["classification"] == expected_category
     assert diagnostic["reason_code"] == expected_reason
     assert diagnostic["error_key"] == expected_key
+    assert diagnostic["error_shape"] == expected_shape
+    assert diagnostic["error_entry_count"] <= 32
     assert diagnostic["status_code"] == 200
     assert diagnostic["external_request"] is True
     assert diagnostic["terminal"] is True
@@ -151,6 +153,41 @@ async def test_http_200_error_shapes_produce_safe_structured_diagnostics(monkeyp
     assert "must-not-leak" not in str(provider.last_request_events)
     assert provider.consecutive_failures == 0
     assert provider.circuit_open_until == 0
+
+
+def test_recursive_error_diagnostics_are_bounded_and_structural():
+    nested_season = classify_api_error({"parameters": {"season": "required"}})
+    assert nested_season.category == "missing_parameter"
+    assert nested_season.reason_code == "season_required"
+    assert nested_season.error_key == "season"
+    assert nested_season.error_shape == "nested_object"
+
+    nested_date = classify_api_error({"parameters": {"date": "invalid"}})
+    assert nested_date.category == "invalid_parameter"
+    assert nested_date.reason_code == "invalid_date"
+
+    nested_list = classify_api_error({"outer": {"inner": ["opaque secret=must-not-leak"]}})
+    assert nested_list.category == "provider_error"
+    assert nested_list.error_key == "unknown_key"
+    assert nested_list.error_shape == "nested_list"
+    assert "must-not-leak" not in str(nested_list)
+
+    deep = "opaque"
+    for _ in range(8):
+        deep = {"outer": deep}
+    deep_result = classify_api_error(deep)
+    assert deep_result.diagnostic_truncated is True or deep_result.error_shape == "malformed_response"
+
+    huge = {f"unknown_{index}": "opaque" for index in range(40)}
+    huge_result = classify_api_error(huge)
+    assert huge_result.error_entry_count <= 32
+    assert huge_result.diagnostic_truncated is True
+
+
+def test_semantic_tags_never_contain_provider_text_or_credentials():
+    classification = classify_api_error({"parameters": {"season": "required"}, "message": "api_key=SUPER_SECRET Authorization=Bearer SUPER_SECRET"})
+    assert classification.semantic_tags == ("parameter", "season", "auth", "key")
+    assert "SUPER_SECRET" not in str(classification)
 
 
 @pytest.mark.parametrize(
@@ -294,6 +331,10 @@ def test_structured_provider_diagnostics_are_persisted_without_raw_messages(monk
         "error_category": "invalid_parameter",
         "reason_code": "season_required",
         "error_key": "season",
+        "error_shape": "nested_object",
+        "error_entry_count": 1,
+        "semantic_tags": ["parameter", "season"],
+        "diagnostic_truncated": False,
         "cache_hit": False,
         "external_request": True,
     }]
@@ -303,8 +344,8 @@ def test_structured_provider_diagnostics_are_persisted_without_raw_messages(monk
         with Session(engine) as db:
             usage = db.scalar(select(ProviderUsage).where(ProviderUsage.provider == provider.name))
             health = db.scalar(select(ProviderHealth).where(ProviderHealth.provider == provider.name))
-        assert usage is not None and usage.error_category == "invalid_parameter" and usage.reason_code == "season_required" and usage.error_key == "season"
-        assert health is not None and health.state == "invalid_parameter" and health.reason_code == "season_required" and health.error_key == "season"
+        assert usage is not None and usage.error_category == "invalid_parameter" and usage.reason_code == "season_required" and usage.error_key == "season" and usage.error_shape == "nested_object" and usage.semantic_tags == ["parameter", "season"]
+        assert health is not None and health.state == "invalid_parameter" and health.reason_code == "season_required" and health.error_key == "season" and health.error_shape == "nested_object"
         assert "must-not-leak" not in (usage.error or "")
         assert "must-not-leak" not in (health.last_error or "")
     finally:

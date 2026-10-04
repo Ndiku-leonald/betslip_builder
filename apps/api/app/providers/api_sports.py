@@ -23,6 +23,10 @@ class ProviderErrorClassification:
     category: str
     reason_code: str
     error_key: str | None = None
+    error_shape: str | None = None
+    error_entry_count: int = 0
+    semantic_tags: tuple[str, ...] = ()
+    diagnostic_truncated: bool = False
 
 
 _ERROR_KEY_ALIASES = {
@@ -36,71 +40,177 @@ _ERROR_KEY_ALIASES = {
     "from": "date",
     "league_id": "league",
     "parameter": "parameter",
+    "parameters": "parameters",
     "ratelimit": "rate_limit",
     "rate_limit": "rate_limit",
     "request_limit": "quota",
-    "requests": "quota",
     "subscription": "subscription",
     "timezone": "timezone",
-    "token": "authentication",
     "to": "date",
 }
 _SAFE_ERROR_KEY = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+_SAFE_ERROR_KEYS = {
+    "api_key", "auth", "authentication", "circuit", "competition", "configuration", "date", "endpoint", "error", "fixture", "id", "league", "live", "message", "missing", "parameters", "parameter", "plan", "query", "quota", "rate_limit", "request_limit", "requests", "response", "season", "status", "subscription", "team", "timezone", "token", "transport", "unknown_key", "unsupported"
+}
+_MAX_ERROR_DEPTH = 4
+_MAX_ERROR_ENTRIES = 32
+_MAX_ERROR_TEXT_LENGTH = 256
+_SEMANTIC_TAG_ORDER = (
+    "date", "plan", "request", "limit", "parameter", "season", "league", "account", "access", "subscription", "auth", "token", "key", "timezone", "fixture", "endpoint"
+)
+
+
+@dataclass
+class _ErrorInspection:
+    shape: str
+    entries: list[tuple[str | None, str]]
+    structural_keys: tuple[str, ...]
+    entry_count: int
+    unknown_key_seen: bool
+    semantic_tags: tuple[str, ...]
+    truncated: bool
 
 
 def _safe_error_key(value: Any) -> str | None:
     normalized = re.sub(r"[^a-z0-9]+", "_", str(value).strip().casefold()).strip("_")
     if not normalized or not _SAFE_ERROR_KEY.fullmatch(normalized):
         return None
-    return _ERROR_KEY_ALIASES.get(normalized, normalized if normalized in {
-        "circuit", "configuration", "date", "endpoint", "error", "fixture", "id", "league", "live", "message", "missing", "plan", "query", "response", "season", "status", "team", "transport", "unsupported", "quota", "rate_limit", "subscription", "authentication", "parameter", "timezone"
-    } else None)
+    return _ERROR_KEY_ALIASES.get(normalized, normalized if normalized in _SAFE_ERROR_KEYS else None)
+
+
+def _error_shape(value: Any, depth: int = 0) -> str:
+    if depth > _MAX_ERROR_DEPTH:
+        return "malformed_response"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, dict):
+        child_shapes = [_error_shape(item, depth + 1) for item in list(value.values())[:_MAX_ERROR_ENTRIES]]
+        if any(shape in {"nested_list", "list"} for shape in child_shapes):
+            return "nested_list"
+        if any(shape in {"nested_object", "object"} for shape in child_shapes):
+            return "nested_object"
+        return "object"
+    if isinstance(value, list):
+        child_shapes = [_error_shape(item, depth + 1) for item in value[:_MAX_ERROR_ENTRIES]]
+        if any(shape in {"nested_list", "nested_object", "list", "object"} for shape in child_shapes):
+            return "nested_list"
+        return "list"
+    return "malformed_response"
+
+
+def _semantic_tags(entries: list[tuple[str | None, str]], structural_keys: tuple[str, ...] = ()) -> tuple[str, ...]:
+    keys = {key for key, _ in entries if key} | set(structural_keys)
+    text = " ".join(f"{key or ''} {value}" for key, value in entries).casefold()
+    rules = {
+        "date": bool({"date"} & keys) or bool(re.search(r"\bdate\b", text)),
+        "plan": "plan" in keys or bool(re.search(r"\bplan\b", text)),
+        "request": "requests" in keys or "request_limit" in keys or bool(re.search(r"\brequests?\b", text)),
+        "limit": "quota" in keys or "rate_limit" in keys or bool(re.search(r"\blimit\b|\bquota\b", text)),
+        "parameter": "parameter" in keys or "parameters" in keys or bool(re.search(r"\bparameters?\b", text)),
+        "season": "season" in keys or bool(re.search(r"\bseason\b", text)),
+        "league": "league" in keys or bool(re.search(r"\bleague\b|\bcompetition\b", text)),
+        "account": bool(re.search(r"\baccount\b|\bcredential\b", text)),
+        "access": bool(re.search(r"\baccess\b|\bentitlement\b|\bforbidden\b|\bdenied\b", text)),
+        "subscription": "subscription" in keys or bool(re.search(r"\bsubscription\b", text)),
+        "auth": "auth" in keys or "authentication" in keys or bool(re.search(r"\bauth(?:entication|orization)?\b|\bunauthorized\b", text)),
+        "token": "token" in keys or bool(re.search(r"\btoken\b", text)),
+        "key": "api_key" in keys or bool(re.search(r"\bapi[_ -]?key\b|\binvalid key\b", text)),
+        "timezone": "timezone" in keys or bool(re.search(r"\btimezone\b", text)),
+        "fixture": "fixture" in keys or bool(re.search(r"\bfixture\b", text)),
+        "endpoint": "endpoint" in keys or bool(re.search(r"\bendpoint\b", text)),
+    }
+    return tuple(tag for tag in _SEMANTIC_TAG_ORDER if rules[tag])
+
+
+def _inspect_error(value: Any) -> _ErrorInspection:
+    entries: list[tuple[str | None, str]] = []
+    state = {"unknown_key_seen": False, "truncated": False, "structural_keys": set()}
+
+    def visit(node: Any, depth: int, key_hint: str | None = None) -> None:
+        if depth > _MAX_ERROR_DEPTH or len(entries) >= _MAX_ERROR_ENTRIES:
+            state["truncated"] = True
+            return
+        if isinstance(node, dict):
+            for raw_key, child in list(node.items())[:_MAX_ERROR_ENTRIES]:
+                safe_key = _safe_error_key(raw_key)
+                if safe_key is None:
+                    state["unknown_key_seen"] = True
+                else:
+                    state["structural_keys"].add(safe_key)
+                visit(child, depth + 1, safe_key or key_hint)
+            if len(node) > _MAX_ERROR_ENTRIES:
+                state["truncated"] = True
+            return
+        if isinstance(node, list):
+            for child in node[:_MAX_ERROR_ENTRIES]:
+                visit(child, depth + 1, key_hint)
+            if len(node) > _MAX_ERROR_ENTRIES:
+                state["truncated"] = True
+            return
+        entries.append((key_hint, str(node)[:_MAX_ERROR_TEXT_LENGTH]))
+
+    visit(value, 0)
+    return _ErrorInspection(
+        shape=_error_shape(value),
+        entries=entries,
+        structural_keys=tuple(sorted(state["structural_keys"])),
+        entry_count=len(entries),
+        unknown_key_seen=bool(state["unknown_key_seen"]),
+        semantic_tags=_semantic_tags(entries, tuple(sorted(state["structural_keys"]))),
+        truncated=bool(state["truncated"]),
+    )
 
 
 def _error_entries(value: Any) -> list[tuple[str | None, str]]:
-    if isinstance(value, dict):
-        entries: list[tuple[str | None, str]] = []
-        for key, item in value.items():
-            entries.append((_safe_error_key(key), str(item)))
-        return entries
-    if isinstance(value, list):
-        return [(None, str(item)) for item in value]
-    return [(None, str(value))]
+    return _inspect_error(value).entries
 
 
 def classify_api_error(value: Any) -> ProviderErrorClassification:
     """Classify API-Sports errors without retaining their raw keys or values."""
-    entries = _error_entries(value)
-    keys = {key for key, _ in entries if key}
+    inspection = _inspect_error(value)
+    entries = inspection.entries
+    keys = set(inspection.structural_keys)
     text = " ".join(item for _, item in entries).casefold()
     text_with_keys = f"{' '.join(keys)} {text}"
 
+    def result(category: str, reason_code: str, error_key: str | None = None) -> ProviderErrorClassification:
+        return ProviderErrorClassification(category, reason_code, error_key, inspection.shape, inspection.entry_count, inspection.semantic_tags, inspection.truncated)
+
     if "season" in keys and any(token in text for token in ("required", "missing", "must provide", "needed")):
-        return ProviderErrorClassification("missing_parameter", "season_required", "season")
-    if ("date" in keys and any(token in text for token in ("invalid", "format", "required", "outside"))) or "invalid date" in text:
-        return ProviderErrorClassification("invalid_parameter", "invalid_date", "date")
+        return result("missing_parameter", "season_required", "season")
+    plan_signal = bool({"plan", "subscription"} & keys) or any(token in text for token in ("subscription", "your plan", "free plan", "not subscribed"))
+    date_access_signal = "date" in keys or any(token in text for token in ("date", "historical", "coverage", "allowed dates", "outside"))
+    if plan_signal and date_access_signal:
+        return result("plan_restricted", "date_outside_subscription_window", "plan" if "plan" in keys else "subscription" if "subscription" in keys else None)
+    if ("date" in keys and any(token in text for token in ("invalid", "format", "required"))) or "invalid date" in text:
+        return result("invalid_parameter", "invalid_date", "date")
     if "league" in keys and any(token in text for token in ("required", "missing")):
-        return ProviderErrorClassification("missing_parameter", "league_required", "league")
+        return result("missing_parameter", "league_required", "league")
     if ("league" in keys and any(token in text for token in ("invalid", "unknown", "not found", "required"))) or any(token in text for token in ("invalid league", "invalid competition")):
-        return ProviderErrorClassification("invalid_parameter", "invalid_league", "league")
+        return result("invalid_parameter", "invalid_league", "league")
     if any(token in text_with_keys for token in ("missing parameter", "parameter required", "required parameter", "missing field")):
-        return ProviderErrorClassification("missing_parameter", "missing_parameter", "parameter" if "parameter" in keys else None)
+        return result("missing_parameter", "missing_parameter", "parameter" if "parameter" in keys else None)
     if any(token in text_with_keys for token in ("unsupported", "not supported", "unknown endpoint", "not available for this request")):
-        return ProviderErrorClassification("unsupported_request", "unsupported_request", next(iter(keys & {"endpoint", "unsupported"}), None))
+        return result("unsupported_request", "unsupported_request", next(iter(keys & {"endpoint", "unsupported"}), None))
     if any(token in text_with_keys for token in ("rate limit", "rate-limit", "ratelimit", "throttle", "too many requests")):
-        return ProviderErrorClassification("rate_limited", "rate_limit_exceeded", "rate_limit" if "rate_limit" in keys else None)
+        return result("rate_limited", "rate_limit_exceeded", "rate_limit" if "rate_limit" in keys else None)
     if any(token in text_with_keys for token in ("quota", "daily limit", "daily request", "request limit", "requests limit", "remaining")):
-        return ProviderErrorClassification("quota_exhausted", "daily_quota_exhausted" if "daily" in text else "request_quota_exhausted", next(iter(keys & {"quota", "rate_limit"}), None))
+        return result("quota_exhausted", "daily_quota_exhausted" if "daily" in text else "request_quota_exhausted", next(iter(keys & {"quota", "requests", "request_limit"}), None))
     if any(token in text_with_keys for token in ("unauthorized", "authentication", "invalid key", "api key", "token")):
-        return ProviderErrorClassification("authentication_failed", "invalid_api_key" if any(token in text for token in ("invalid", "key", "token")) else "authentication_failed", next(iter(keys & {"api_key", "authentication"}), None))
-    if any(token in text_with_keys for token in ("subscription", "plan", "not subscribed", "not available on your plan")):
-        reason = "date_outside_subscription_window" if any(token in text for token in ("date", "historical", "free plan", "allowed dates", "coverage")) else "subscription_restricted"
-        return ProviderErrorClassification("plan_restricted", reason, next(iter(keys & {"plan", "subscription"}), None))
+        return result("authentication_failed", "invalid_api_key" if any(token in text for token in ("invalid", "key", "token")) else "authentication_failed", next(iter(keys & {"api_key", "authentication", "token"}), None))
+    if plan_signal:
+        return result("plan_restricted", "subscription_restricted", next(iter(keys & {"plan", "subscription"}), None))
     if any(token in text_with_keys for token in ("access denied", "forbidden", "entitlement")):
-        return ProviderErrorClassification("entitlement_unavailable", "access_denied", None)
+        return result("entitlement_unavailable", "access_denied", None)
     if any(token in text_with_keys for token in ("temporarily unavailable", "internal error", "service unavailable", "try again")):
-        return ProviderErrorClassification("temporarily_unavailable", "provider_temporarily_unavailable", None)
-    return ProviderErrorClassification("provider_error", "unknown_provider_error", next(iter(keys), None))
+        return result("temporarily_unavailable", "provider_temporarily_unavailable", None)
+    return result("provider_error", "unknown_provider_error", "unknown_key" if inspection.unknown_key_seen else next(iter(keys), None))
 
 
 def classify_http_error(status_code: int) -> ProviderErrorClassification:
@@ -118,13 +228,17 @@ def classify_http_error(status_code: int) -> ProviderErrorClassification:
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, provider: str, message: str, status_code: int | None = None, *, category: str | None = None, reason_code: str | None = None, error_key: str | None = None, terminal: bool = False, retryable: bool = False, external_request: bool | None = None, endpoint: str | None = None) -> None:
+    def __init__(self, provider: str, message: str, status_code: int | None = None, *, category: str | None = None, reason_code: str | None = None, error_key: str | None = None, error_shape: str | None = None, error_entry_count: int = 0, semantic_tags: tuple[str, ...] = (), diagnostic_truncated: bool = False, terminal: bool = False, retryable: bool = False, external_request: bool | None = None, endpoint: str | None = None) -> None:
         super().__init__(message)
         self.provider = provider
         self.status_code = status_code
         self.category = category
         self.reason_code = reason_code
         self.error_key = _safe_error_key(error_key)
+        self.error_shape = error_shape
+        self.error_entry_count = min(max(error_entry_count, 0), _MAX_ERROR_ENTRIES)
+        self.semantic_tags = tuple(tag for tag in semantic_tags if tag in _SEMANTIC_TAG_ORDER)
+        self.diagnostic_truncated = diagnostic_truncated
         self.terminal = terminal
         self.retryable = retryable
         self.external_request = external_request
@@ -137,6 +251,10 @@ class ProviderError(RuntimeError):
             "classification": self.category or "provider_error",
             "reason_code": self.reason_code or "provider_error",
             "error_key": self.error_key,
+            "error_shape": self.error_shape,
+            "error_entry_count": self.error_entry_count,
+            "semantic_tags": list(self.semantic_tags),
+            "diagnostic_truncated": self.diagnostic_truncated,
             "status_code": self.status_code,
             "external_request": bool(self.external_request),
             "terminal": self.terminal,
@@ -276,8 +394,8 @@ class ApiSportsProvider:
         self.last_quota_blocked = False
         self.last_circuit_blocked = False
 
-    def _request_event(self, endpoint: str, *, status_code: int | None, latency_ms: float | None, rate_limit_remaining: int | None, error: str | None = None, classification: str | None = None, reason_code: str | None = None, error_key: str | None = None, external_request: bool = True, requested_at: datetime | None = None, usage_id: str | None = None) -> None:
-        self.last_request_events.append({"endpoint": endpoint, "requested_at": requested_at or datetime.now(timezone.utc), "usage_id": usage_id, "status_code": status_code, "latency_ms": latency_ms, "rate_limit_remaining": rate_limit_remaining, "error": error, "error_category": classification, "reason_code": reason_code, "error_key": error_key, "cache_hit": False, "external_request": external_request})
+    def _request_event(self, endpoint: str, *, status_code: int | None, latency_ms: float | None, rate_limit_remaining: int | None, error: str | None = None, classification: str | None = None, reason_code: str | None = None, error_key: str | None = None, error_shape: str | None = None, error_entry_count: int = 0, semantic_tags: tuple[str, ...] = (), diagnostic_truncated: bool = False, external_request: bool = True, requested_at: datetime | None = None, usage_id: str | None = None) -> None:
+        self.last_request_events.append({"endpoint": endpoint, "requested_at": requested_at or datetime.now(timezone.utc), "usage_id": usage_id, "status_code": status_code, "latency_ms": latency_ms, "rate_limit_remaining": rate_limit_remaining, "error": error, "error_category": classification, "reason_code": reason_code, "error_key": error_key, "error_shape": error_shape, "error_entry_count": error_entry_count, "semantic_tags": list(semantic_tags), "diagnostic_truncated": diagnostic_truncated, "cache_hit": False, "external_request": external_request})
 
     def _complete_attempt(self, reservation, *, status_code: int | None, latency_ms: float | None, rate_limit_remaining: int | None, error: str | None = None) -> None:
         self.quota.record(self.name, reservation)
@@ -349,23 +467,23 @@ class ApiSportsProvider:
                     raise ProviderError(self.name, self.last_error, response.status_code, category=classification.category, reason_code=classification.reason_code, error_key=classification.error_key, terminal=response.status_code < 500 or response.status_code == 429, retryable=response.status_code >= 500, endpoint=endpoint)
                 payload = response.json()
                 if not isinstance(payload, dict):
-                    classification = ProviderErrorClassification("provider_error", "unknown_provider_error", "response")
+                    classification = ProviderErrorClassification("provider_error", "unknown_provider_error", "response", "malformed_response")
                     message = "Provider API error (provider_error)"
                     self.last_error = message
                     self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=message)
-                    self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=message, classification=classification.category, reason_code=classification.reason_code, error_key=classification.error_key)
-                    raise ProviderError(self.name, message, response.status_code, category=classification.category, reason_code=classification.reason_code, error_key=classification.error_key, terminal=True, endpoint=endpoint)
+                    self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=message, classification=classification.category, reason_code=classification.reason_code, error_key=classification.error_key, error_shape=classification.error_shape)
+                    raise ProviderError(self.name, message, response.status_code, category=classification.category, reason_code=classification.reason_code, error_key=classification.error_key, error_shape=classification.error_shape, terminal=True, endpoint=endpoint)
                 errors = payload.get("errors") if isinstance(payload, dict) else None
                 if errors:
                     classification = classify_api_error(errors)
                     message = f"Provider API error ({classification.category})"
                     self.last_error = message
                     self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=message)
-                    self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=message, classification=classification.category, reason_code=classification.reason_code, error_key=classification.error_key)
+                    self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=message, classification=classification.category, reason_code=classification.reason_code, error_key=classification.error_key, error_shape=classification.error_shape, error_entry_count=classification.error_entry_count, semantic_tags=classification.semantic_tags, diagnostic_truncated=classification.diagnostic_truncated)
                     # HTTP 200 plus an API-level error is a terminal semantic
                     # response for this bounded operation, not a transport
                     # failure. Do not trip the circuit breaker.
-                    raise ProviderError(self.name, message, response.status_code, category=classification.category, reason_code=classification.reason_code, error_key=classification.error_key, terminal=True, retryable=False, external_request=True, endpoint=endpoint)
+                    raise ProviderError(self.name, message, response.status_code, category=classification.category, reason_code=classification.reason_code, error_key=classification.error_key, error_shape=classification.error_shape, error_entry_count=classification.error_entry_count, semantic_tags=classification.semantic_tags, diagnostic_truncated=classification.diagnostic_truncated, terminal=True, retryable=False, external_request=True, endpoint=endpoint)
                 self.last_observed_at = datetime.now(timezone.utc)
                 self.last_success_at = self.last_observed_at
                 self.last_error = None

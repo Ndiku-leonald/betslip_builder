@@ -355,6 +355,10 @@ class ProviderUsage(TimestampMixin, Base):
     error_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
     reason_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     error_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error_shape: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    error_entry_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    semantic_tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    diagnostic_truncated: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class ProviderHealth(TimestampMixin, Base):
@@ -366,6 +370,10 @@ class ProviderHealth(TimestampMixin, Base):
     state: Mapped[str] = mapped_column(String(40), default="unknown")
     reason_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     error_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error_shape: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    error_entry_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    semantic_tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    diagnostic_truncated: Mapped[bool] = mapped_column(Boolean, default=False)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)

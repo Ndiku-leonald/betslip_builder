@@ -44,6 +44,26 @@ class ProviderStatus(BaseModel):
     capabilities: dict[str, bool]
 
 
+class ApiFootballSubscriptionStatus(BaseModel):
+    plan: str | None = None
+    active: bool | None = None
+    end: str | None = None
+
+
+class ApiFootballRequestStatus(BaseModel):
+    current: int | None = None
+    limit_day: int | None = None
+    remaining: int | None = None
+
+
+class ApiFootballStatusOut(BaseModel):
+    provider: str
+    configured: bool
+    reachable: bool
+    subscription: ApiFootballSubscriptionStatus
+    requests: ApiFootballRequestStatus
+
+
 class IngestionBootstrapRequest(BaseModel):
     sport: Literal["football", "basketball"] = "football"
     competition: str | None = None

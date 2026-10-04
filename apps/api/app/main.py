@@ -35,7 +35,7 @@ from app.odds.ontology import NormalizedMarket
 from app.providers.reliability import source_reliability, SOURCE_ROLES
 from app.quota import QuotaManager
 from app.quota_store import PersistentQuotaStore
-from app.schemas import DetailOut, FixtureOut, IngestionBootstrapRequest, LiveMarketResultOut, LivePredictionOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut, SlipBuildOut, SlipBuildRequest
+from app.schemas import ApiFootballStatusOut, DetailOut, FixtureOut, IngestionBootstrapRequest, LiveMarketResultOut, LivePredictionOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut, SlipBuildOut, SlipBuildRequest
 from app.live.service import LiveIntelligenceService
 from app.live.persistence import latest_live_match_snapshot, persist_live_match_snapshot, state_for_fixture
 from app.live.state import normalize_basketball_live_state, normalize_football_live_state, state_from_fixture
@@ -993,6 +993,32 @@ def provider_usage(db: Session = Depends(get_db)) -> list[ProviderUsageOut]:
     for provider in providers.values():
         count = db.scalar(select(func.count(ProviderUsage.id)).where(ProviderUsage.provider == provider.name, ProviderUsage.requested_at >= today_start, ProviderUsage.cache_hit.is_(False), ProviderUsage.external_request.is_(True))) or 0
         result.append(ProviderUsageOut(provider=provider.name, calls_today=int(count), mode=settings.quota_mode))
+    return result
+
+
+@app.get("/admin/providers/api-football/status", response_model=ApiFootballStatusOut)
+async def api_football_status(_admin: None = Depends(require_admin)) -> dict:
+    """Return safe API-Football account diagnostics for administrators only."""
+    provider = football
+    try:
+        result = await provider.account_status()
+    except ProviderError as exc:
+        diagnostic = {
+            "classification": exc.category or "provider_error",
+            "reason_code": exc.reason_code or "provider_error",
+            "error_key": exc.error_key,
+            "error_shape": exc.error_shape,
+            "semantic_tags": list(exc.semantic_tags),
+        }
+        return JSONResponse(
+            status_code=503,
+            content={
+                "provider": provider.name,
+                "configured": provider.configured,
+                "reachable": exc.status_code is not None and exc.status_code < 500,
+                "diagnostic": diagnostic,
+            },
+        )
     return result
 
 

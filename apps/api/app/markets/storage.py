@@ -9,12 +9,22 @@ from app.models import OddsSnapshot, ProviderObservation
 from app.odds.ontology import NormalizedMarket
 
 
-def persist_market_snapshots(db: Session, markets: list[NormalizedMarket]) -> int:
+def persist_market_snapshots(db: Session, markets: list[NormalizedMarket], *, deduplicate: bool = False) -> int:
     """Append normalized snapshots; never overwrite a prior observation."""
+    existing = {}
+    if deduplicate:
+        for item in db.scalars(select(OddsSnapshot).order_by(OddsSnapshot.created_at.desc())):
+            existing.setdefault(market_identity(item), []).append(item)
+    saved = 0
     for market in markets:
+        if deduplicate:
+            prior = existing.get(market_identity(market), [])
+            if any(item.decimal_odds == market.decimal_odds and item.source_event_id == market.source_event_id for item in prior[:3]):
+                continue
         db.add(OddsSnapshot(fixture_id=market.fixture_id, provider=market.provider, bookmaker=market.bookmaker, source_event_id=market.source_event_id, market_family=market.market_family, market_type=market.market_type, period=market.period, participant=market.participant, selection=market.selection, line=market.line, decimal_odds=market.decimal_odds, market_status=market.status, is_live=market.is_live, settlement_semantics=market.settlement_semantics, observed_at=market.observed_at, provider_updated_at=market.provider_updated_at, payload=market.raw or {}))
+        saved += 1
     db.commit()
-    return len(markets)
+    return saved
 
 
 def market_identity(market: OddsSnapshot | NormalizedMarket) -> tuple:

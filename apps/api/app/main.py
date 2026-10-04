@@ -3,6 +3,7 @@ import time as time_module
 from dataclasses import replace
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
+from threading import Lock
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -34,7 +35,7 @@ from app.odds.ontology import NormalizedMarket
 from app.providers.reliability import source_reliability, SOURCE_ROLES
 from app.quota import QuotaManager
 from app.quota_store import PersistentQuotaStore
-from app.schemas import DetailOut, FixtureOut, LiveMarketResultOut, LivePredictionOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut, SlipBuildOut, SlipBuildRequest
+from app.schemas import DetailOut, FixtureOut, IngestionBootstrapRequest, LiveMarketResultOut, LivePredictionOut, ModelVersionOut, PredictionOut, ProviderStatus, ProviderUsageOut, SlipBuildOut, SlipBuildRequest
 from app.live.service import LiveIntelligenceService
 from app.live.persistence import latest_live_match_snapshot, persist_live_match_snapshot, state_for_fixture
 from app.live.state import normalize_basketball_live_state, normalize_football_live_state, state_from_fixture
@@ -42,6 +43,7 @@ from app.live.backtest import evaluate_live_backtest
 from app.live.throttle import claim_refresh
 from app.prediction.service import PredictionService, PredictionUnavailable
 from app.services.ingestion import ingest_fixtures
+from app.services.bootstrap import BootstrapScope, provider_state, run_bootstrap
 from app.slips.config import PROFILE_CONFIG
 from app.slips.optimizer import SlipOptimizer
 from app.observability import Metrics, configure_logging
@@ -70,6 +72,8 @@ metrics = Metrics()
 prediction_service = PredictionService()
 live_service = LiveIntelligenceService()
 slip_optimizer = SlipOptimizer()
+_bootstrap_lock = Lock()
+_ingestion_status: dict = {"status": "idle", "started_at": None, "finished_at": None}
 
 
 def _app_today() -> date:
@@ -128,6 +132,39 @@ def _record_usage(provider: ApiSportsProvider, endpoint: str, *, status_code: in
         db.commit()
         metrics.inc("provider_requests_total", len(events))
         metrics.inc("provider_failures_total", sum(1 for event in events if event.get("error")))
+
+
+def _record_generic_usage(provider: object, endpoint: str, status_code: int | None, error: str | None = None) -> None:
+    """Update usage/health for adapters without API-Football request events.
+
+    Persistent quota reservations already create the usage row.  This helper
+    updates that row's health view and only creates a row for adapters that do
+    not use the persistent quota store.
+    """
+    now = datetime.now(timezone.utc)
+    name = getattr(provider, "name", "unknown")
+    configured = bool(getattr(provider, "configured", False))
+    with SessionLocal() as db:
+        latest = db.scalar(select(ProviderUsage).where(ProviderUsage.provider == name).order_by(ProviderUsage.requested_at.desc()).limit(1))
+        cache_hit = bool(getattr(provider, "last_cache_hit", False))
+        if latest is None or latest.status_code is None or (now - (latest.requested_at.replace(tzinfo=timezone.utc) if latest.requested_at.tzinfo is None else latest.requested_at)).total_seconds() > 30:
+            latest = ProviderUsage(provider=name, endpoint=endpoint, requested_at=now, status_code=status_code, latency_ms=getattr(provider, "last_latency_ms", None), cache_hit=cache_hit, external_request=not cache_hit and status_code != 429, rate_limit_remaining=getattr(provider, "last_rate_limit_remaining", None), error=error)
+            db.add(latest)
+        else:
+            latest.status_code = status_code
+            latest.error = error
+        health = db.scalar(select(ProviderHealth).where(ProviderHealth.provider == name))
+        if health is None:
+            health = ProviderHealth(provider=name, configured=configured, healthy=False)
+            db.add(health)
+        health.configured = configured
+        health.healthy = configured and status_code is not None and status_code < 400 and not error
+        health.last_error = error
+        health.last_latency_ms = getattr(provider, "last_latency_ms", None)
+        if health.healthy:
+            health.last_success_at = now
+        health.calls_today = int(db.scalar(select(func.count(ProviderUsage.id)).where(ProviderUsage.provider == name, ProviderUsage.requested_at >= _utc_day_start(), ProviderUsage.cache_hit.is_(False), ProviderUsage.external_request.is_(True))) or 0)
+        db.commit()
 
 
 async def _scheduled_today(sport: str) -> None:
@@ -870,14 +907,19 @@ def provider_status(db: Session = Depends(get_db)) -> list[ProviderStatus]:
     for provider in [*providers.values(), football_data, *( [secondary_football] if secondary_football is not None else [] )]:
         health = db.scalar(select(ProviderHealth).where(ProviderHealth.provider == provider.name))
         if health is not None:
-            result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=provider.configured and health.healthy, last_success_at=health.last_success_at, last_error=health.last_error, latency_ms=health.last_latency_ms, calls_today=health.calls_today, capabilities=provider.capabilities))
+            latest = db.scalar(select(ProviderUsage).where(ProviderUsage.provider == provider.name).order_by(ProviderUsage.requested_at.desc()).limit(1))
+            state = provider_state(configured=provider.configured, status_code=latest.status_code if latest else None, error=latest.error if latest else health.last_error)
+            result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=provider.configured and health.healthy, state=state, last_success_at=health.last_success_at, last_error=health.last_error, latency_ms=health.last_latency_ms, calls_today=health.calls_today, capabilities=provider.capabilities))
             continue
         day_start = _utc_day_start()
         usage = list(db.scalars(select(ProviderUsage).where(ProviderUsage.provider == provider.name).order_by(ProviderUsage.requested_at.desc()).limit(100)))
         successful = next((item for item in usage if item.status_code is not None and item.status_code < 400 and not item.error), None)
         latest = usage[0] if usage else None
         calls_today = db.scalar(select(func.count(ProviderUsage.id)).where(ProviderUsage.provider == provider.name, ProviderUsage.requested_at >= day_start, ProviderUsage.cache_hit.is_(False), ProviderUsage.external_request.is_(True))) or 0
-        result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=bool(successful and (latest is None or not latest.error)) if provider.name != "livescore-football" else bool(provider.last_success_at and not provider.last_error), last_success_at=successful.requested_at if successful else provider.last_success_at, last_error=latest.error if latest and latest.error else provider.last_error, latency_ms=latest.latency_ms if latest else provider.last_latency_ms, calls_today=int(calls_today) if provider.name != "livescore-football" else 0, capabilities=provider.capabilities))
+        current_error = latest.error if latest and latest.error else getattr(provider, "last_error", None)
+        current_status = latest.status_code if latest else getattr(provider, "last_status_code", None)
+        healthy = bool(successful and (latest is None or not latest.error)) if provider.name != "livescore-football" else bool(getattr(provider, "last_success_at", None) and not getattr(provider, "last_error", None))
+        result.append(ProviderStatus(provider=provider.name, configured=provider.configured, healthy=healthy, state=provider_state(configured=provider.configured, status_code=current_status, error=current_error), last_success_at=successful.requested_at if successful else getattr(provider, "last_success_at", None), last_error=current_error, latency_ms=latest.latency_ms if latest else getattr(provider, "last_latency_ms", None), calls_today=int(calls_today) if provider.name != "livescore-football" else 0, capabilities=provider.capabilities))
     return result
 
 
@@ -910,6 +952,47 @@ def provider_usage(db: Session = Depends(get_db)) -> list[ProviderUsageOut]:
         count = db.scalar(select(func.count(ProviderUsage.id)).where(ProviderUsage.provider == provider.name, ProviderUsage.requested_at >= today_start, ProviderUsage.cache_hit.is_(False), ProviderUsage.external_request.is_(True))) or 0
         result.append(ProviderUsageOut(provider=provider.name, calls_today=int(count), mode=settings.quota_mode))
     return result
+
+
+@app.post("/admin/ingestion/bootstrap")
+async def ingestion_bootstrap(request: IngestionBootstrapRequest, _admin: None = Depends(require_admin)) -> dict:
+    """Run one small, explicit real-provider bootstrap for staging."""
+    global _ingestion_status
+    if not _bootstrap_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail={"code": "INGESTION_BUSY", "message": "An ingestion operation is already running."})
+    started = datetime.now(timezone.utc)
+    _ingestion_status = {"status": "running", "started_at": started, "finished_at": None, "sport": request.sport, "scope": request.model_dump()}
+    try:
+        scope = BootstrapScope(**request.model_dump())
+        db = SessionLocal()
+        try:
+            def record_event(provider, endpoint, status_code, error):
+                if isinstance(provider, ApiSportsProvider):
+                    _record_usage(provider, endpoint, status_code=status_code, error=error)
+                else:
+                    _record_generic_usage(provider, endpoint, status_code, error)
+
+            result = await run_bootstrap(db, scope, provider=providers[scope.sport], odds_provider=odds_provider, record_provider_event=record_event)
+        finally:
+            db.close()
+        finished = datetime.now(timezone.utc)
+        payload = {**result.as_dict(), "started_at": started, "finished_at": finished}
+        _ingestion_status = payload
+        if result.status == "failed":
+            return JSONResponse(status_code=503, content=jsonable_encoder(payload))
+        return jsonable_encoder(payload)
+    except Exception:
+        logging.getLogger(__name__).exception("bounded ingestion bootstrap failed")
+        finished = datetime.now(timezone.utc)
+        _ingestion_status = {"status": "failed", "started_at": started, "finished_at": finished, "sport": request.sport, "scope": request.model_dump(), "providers_attempted": [providers[request.sport].name], "providers_succeeded": [], "providers_unavailable": [], "warnings": ["Bootstrap failed before a safe summary could be produced."], "error_category": "internal_error"}
+        raise HTTPException(status_code=500, detail={"code": "INGESTION_FAILED", "message": "Ingestion bootstrap failed."})
+    finally:
+        _bootstrap_lock.release()
+
+
+@app.get("/admin/ingestion/status")
+def ingestion_status(_admin: None = Depends(require_admin)) -> dict:
+    return jsonable_encoder(_ingestion_status)
 
 
 @app.post("/api/ingestion/today")

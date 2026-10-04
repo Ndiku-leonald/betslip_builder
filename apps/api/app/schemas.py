@@ -30,11 +30,33 @@ class ProviderStatus(BaseModel):
     provider: str
     configured: bool
     healthy: bool
+    state: str = "unknown"
     last_success_at: datetime | None
     last_error: str | None
     latency_ms: float | None
     calls_today: int
     capabilities: dict[str, bool]
+
+
+class IngestionBootstrapRequest(BaseModel):
+    sport: Literal["football", "basketball"] = "football"
+    competition: str | None = None
+    lookback_days: int = 3
+    lookahead_days: int = 7
+    include_statistics: bool = True
+    include_odds: bool = True
+
+    @model_validator(mode="after")
+    def validate_bootstrap_bounds(self):
+        if self.lookback_days < 0 or self.lookback_days > 7:
+            raise ValueError("lookback_days must be between 0 and 7")
+        if self.lookahead_days < 0 or self.lookahead_days > 7:
+            raise ValueError("lookahead_days must be between 0 and 7")
+        if self.competition is not None and (len(self.competition) > 40 or any(char in self.competition for char in "?/\\")):
+            raise ValueError("competition must be a provider competition identifier, not a URL or path")
+        if self.sport == "football" and not self.competition:
+            self.competition = "39"
+        return self
 
 
 class ProviderUsageOut(BaseModel):

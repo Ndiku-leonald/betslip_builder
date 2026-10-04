@@ -51,6 +51,8 @@ class BootstrapResult:
     providers_succeeded: list[str] = field(default_factory=list)
     providers_unavailable: list[dict[str, str]] = field(default_factory=list)
     provider_state: str | None = None
+    provider_reason_code: str | None = None
+    provider_diagnostic: dict[str, Any] | None = None
     competitions_written: int = 0
     teams_written: int = 0
     fixtures_written: int = 0
@@ -73,6 +75,8 @@ class BootstrapResult:
             "providers_succeeded": self.providers_succeeded,
             "providers_unavailable": self.providers_unavailable,
             "provider_state": self.provider_state,
+            "provider_reason_code": self.provider_reason_code,
+            "provider_diagnostic": self.provider_diagnostic,
             "competitions_written": self.competitions_written,
             "teams_written": self.teams_written,
             "fixtures_written": self.fixtures_written,
@@ -97,6 +101,10 @@ def provider_state(*, configured: bool, status_code: int | None = None, error: s
     for category_name in ("plan_restricted", "entitlement_unavailable", "quota_exhausted", "rate_limited", "temporarily_unavailable", "no_data"):
         if category_name in text:
             return category_name
+    if status_code == 401:
+        return "authentication_failed"
+    if status_code == 400:
+        return "invalid_parameter"
     if status_code == 403:
         return "entitlement_unavailable"
     if status_code == 429:
@@ -153,6 +161,18 @@ async def run_bootstrap(
         result.status = "failed"
         result.error_category = "missing"
         result.provider_state = "missing"
+        result.provider_reason_code = "provider_not_configured"
+        result.provider_diagnostic = {
+            "provider": provider.name,
+            "endpoint": "fixtures",
+            "classification": "missing",
+            "reason_code": "provider_not_configured",
+            "error_key": "configuration",
+            "status_code": None,
+            "external_request": False,
+            "terminal": True,
+            "retryable": False,
+        }
         result.providers_unavailable.append({"provider": provider.name, "state": "missing"})
         result.warnings.append("Primary provider credentials are not configured.")
         return result
@@ -175,6 +195,8 @@ async def run_bootstrap(
             record_provider_event(provider, "bootstrap/fixtures", exc.status_code, str(exc))
             state = provider_state(configured=True, status_code=exc.status_code, error=str(exc), category=exc.category)
             result.provider_state = state
+            result.provider_reason_code = exc.reason_code or "provider_error"
+            result.provider_diagnostic = exc.diagnostic(endpoint=(provider.last_request_events[-1].get("endpoint") if provider.last_request_events else exc.endpoint))
             result.providers_unavailable.append({"provider": provider.name, "state": state})
             result.error_category = state
             result.warnings.append(f"{provider.name} unavailable during fixture ingestion ({state}).")
@@ -206,6 +228,9 @@ async def run_bootstrap(
                 record_provider_event(provider, "bootstrap/statistics", exc.status_code, str(exc))
                 state = provider_state(configured=True, status_code=exc.status_code, error=str(exc), category=exc.category)
                 result.warnings.append(f"Statistics unavailable for one fixture ({state}); stored results remain valid.")
+                if result.provider_diagnostic is None:
+                    result.provider_reason_code = exc.reason_code or "provider_error"
+                    result.provider_diagnostic = exc.diagnostic(endpoint=(provider.last_request_events[-1].get("endpoint") if provider.last_request_events else exc.endpoint))
                 if _is_terminal_provider_error(exc):
                     break
         if not stats_candidates:

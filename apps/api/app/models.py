@@ -352,6 +352,9 @@ class ProviderUsage(TimestampMixin, Base):
     external_request: Mapped[bool] = mapped_column(Boolean, default=True)
     rate_limit_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    reason_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    error_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
 
 class ProviderHealth(TimestampMixin, Base):
@@ -361,6 +364,8 @@ class ProviderHealth(TimestampMixin, Base):
     configured: Mapped[bool] = mapped_column(Boolean, default=False)
     healthy: Mapped[bool] = mapped_column(Boolean, default=False)
     state: Mapped[str] = mapped_column(String(40), default="unknown")
+    reason_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    error_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)

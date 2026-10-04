@@ -1,7 +1,8 @@
 import asyncio
 import logging
 import random
-from dataclasses import asdict, replace
+import re
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from time import monotonic, perf_counter
 from typing import Any
@@ -15,26 +16,132 @@ from app.quota import QuotaManager
 logger = logging.getLogger(__name__)
 
 
-def classify_api_error(value: Any) -> str:
-    """Classify API-Sports response-level errors without exposing raw text."""
-    text = str(value).casefold()
-    if any(token in text for token in ("quota", "rate limit", "rate-limit", "too many", "requests limit", "daily limit", "remaining")):
-        return "quota_exhausted"
-    if any(token in text for token in ("subscription", "plan", "not subscribed", "not available on your plan", "endpoint is not available", "access denied")):
-        return "plan_restricted"
-    if any(token in text for token in ("unauthorized", "authentication", "invalid key", "api key")):
-        return "error"
-    return "error"
+@dataclass(frozen=True)
+class ProviderErrorClassification:
+    """Safe classification of an upstream provider error payload."""
+
+    category: str
+    reason_code: str
+    error_key: str | None = None
+
+
+_ERROR_KEY_ALIASES = {
+    "api_key": "api_key",
+    "apikey": "api_key",
+    "auth": "authentication",
+    "authentication": "authentication",
+    "competition": "league",
+    "date_from": "date",
+    "date_to": "date",
+    "from": "date",
+    "league_id": "league",
+    "parameter": "parameter",
+    "ratelimit": "rate_limit",
+    "rate_limit": "rate_limit",
+    "request_limit": "quota",
+    "requests": "quota",
+    "subscription": "subscription",
+    "timezone": "timezone",
+    "token": "authentication",
+    "to": "date",
+}
+_SAFE_ERROR_KEY = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+
+
+def _safe_error_key(value: Any) -> str | None:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value).strip().casefold()).strip("_")
+    if not normalized or not _SAFE_ERROR_KEY.fullmatch(normalized):
+        return None
+    return _ERROR_KEY_ALIASES.get(normalized, normalized if normalized in {
+        "circuit", "configuration", "date", "endpoint", "error", "fixture", "id", "league", "live", "message", "missing", "plan", "query", "response", "season", "status", "team", "transport", "unsupported", "quota", "rate_limit", "subscription", "authentication", "parameter", "timezone"
+    } else None)
+
+
+def _error_entries(value: Any) -> list[tuple[str | None, str]]:
+    if isinstance(value, dict):
+        entries: list[tuple[str | None, str]] = []
+        for key, item in value.items():
+            entries.append((_safe_error_key(key), str(item)))
+        return entries
+    if isinstance(value, list):
+        return [(None, str(item)) for item in value]
+    return [(None, str(value))]
+
+
+def classify_api_error(value: Any) -> ProviderErrorClassification:
+    """Classify API-Sports errors without retaining their raw keys or values."""
+    entries = _error_entries(value)
+    keys = {key for key, _ in entries if key}
+    text = " ".join(item for _, item in entries).casefold()
+    text_with_keys = f"{' '.join(keys)} {text}"
+
+    if "season" in keys and any(token in text for token in ("required", "missing", "must provide", "needed")):
+        return ProviderErrorClassification("missing_parameter", "season_required", "season")
+    if ("date" in keys and any(token in text for token in ("invalid", "format", "required", "outside"))) or "invalid date" in text:
+        return ProviderErrorClassification("invalid_parameter", "invalid_date", "date")
+    if "league" in keys and any(token in text for token in ("required", "missing")):
+        return ProviderErrorClassification("missing_parameter", "league_required", "league")
+    if ("league" in keys and any(token in text for token in ("invalid", "unknown", "not found", "required"))) or any(token in text for token in ("invalid league", "invalid competition")):
+        return ProviderErrorClassification("invalid_parameter", "invalid_league", "league")
+    if any(token in text_with_keys for token in ("missing parameter", "parameter required", "required parameter", "missing field")):
+        return ProviderErrorClassification("missing_parameter", "missing_parameter", "parameter" if "parameter" in keys else None)
+    if any(token in text_with_keys for token in ("unsupported", "not supported", "unknown endpoint", "not available for this request")):
+        return ProviderErrorClassification("unsupported_request", "unsupported_request", next(iter(keys & {"endpoint", "unsupported"}), None))
+    if any(token in text_with_keys for token in ("rate limit", "rate-limit", "ratelimit", "throttle", "too many requests")):
+        return ProviderErrorClassification("rate_limited", "rate_limit_exceeded", "rate_limit" if "rate_limit" in keys else None)
+    if any(token in text_with_keys for token in ("quota", "daily limit", "daily request", "request limit", "requests limit", "remaining")):
+        return ProviderErrorClassification("quota_exhausted", "daily_quota_exhausted" if "daily" in text else "request_quota_exhausted", next(iter(keys & {"quota", "rate_limit"}), None))
+    if any(token in text_with_keys for token in ("unauthorized", "authentication", "invalid key", "api key", "token")):
+        return ProviderErrorClassification("authentication_failed", "invalid_api_key" if any(token in text for token in ("invalid", "key", "token")) else "authentication_failed", next(iter(keys & {"api_key", "authentication"}), None))
+    if any(token in text_with_keys for token in ("subscription", "plan", "not subscribed", "not available on your plan")):
+        reason = "date_outside_subscription_window" if any(token in text for token in ("date", "historical", "free plan", "allowed dates", "coverage")) else "subscription_restricted"
+        return ProviderErrorClassification("plan_restricted", reason, next(iter(keys & {"plan", "subscription"}), None))
+    if any(token in text_with_keys for token in ("access denied", "forbidden", "entitlement")):
+        return ProviderErrorClassification("entitlement_unavailable", "access_denied", None)
+    if any(token in text_with_keys for token in ("temporarily unavailable", "internal error", "service unavailable", "try again")):
+        return ProviderErrorClassification("temporarily_unavailable", "provider_temporarily_unavailable", None)
+    return ProviderErrorClassification("provider_error", "unknown_provider_error", next(iter(keys), None))
+
+
+def classify_http_error(status_code: int) -> ProviderErrorClassification:
+    if status_code == 401:
+        return ProviderErrorClassification("authentication_failed", "invalid_api_key", "status")
+    if status_code == 403:
+        return ProviderErrorClassification("entitlement_unavailable", "access_denied", "status")
+    if status_code == 429:
+        return ProviderErrorClassification("rate_limited", "rate_limit_exceeded", "status")
+    if status_code == 400:
+        return ProviderErrorClassification("invalid_parameter", "invalid_parameter", "status")
+    if status_code >= 500:
+        return ProviderErrorClassification("temporarily_unavailable", "provider_temporarily_unavailable", "status")
+    return ProviderErrorClassification("provider_error", "provider_http_error", "status")
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, provider: str, message: str, status_code: int | None = None, *, category: str | None = None, terminal: bool = False, external_request: bool | None = None) -> None:
+    def __init__(self, provider: str, message: str, status_code: int | None = None, *, category: str | None = None, reason_code: str | None = None, error_key: str | None = None, terminal: bool = False, retryable: bool = False, external_request: bool | None = None, endpoint: str | None = None) -> None:
         super().__init__(message)
         self.provider = provider
         self.status_code = status_code
         self.category = category
+        self.reason_code = reason_code
+        self.error_key = _safe_error_key(error_key)
         self.terminal = terminal
+        self.retryable = retryable
         self.external_request = external_request
+        self.endpoint = endpoint
+
+    def diagnostic(self, *, endpoint: str | None = None) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "endpoint": endpoint or self.endpoint,
+            "classification": self.category or "provider_error",
+            "reason_code": self.reason_code or "provider_error",
+            "error_key": self.error_key,
+            "status_code": self.status_code,
+            "external_request": bool(self.external_request),
+            "terminal": self.terminal,
+            "retryable": self.retryable,
+        }
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -169,8 +276,8 @@ class ApiSportsProvider:
         self.last_quota_blocked = False
         self.last_circuit_blocked = False
 
-    def _request_event(self, endpoint: str, *, status_code: int | None, latency_ms: float | None, rate_limit_remaining: int | None, error: str | None = None, external_request: bool = True, requested_at: datetime | None = None, usage_id: str | None = None) -> None:
-        self.last_request_events.append({"endpoint": endpoint, "requested_at": requested_at or datetime.now(timezone.utc), "usage_id": usage_id, "status_code": status_code, "latency_ms": latency_ms, "rate_limit_remaining": rate_limit_remaining, "error": error, "cache_hit": False, "external_request": external_request})
+    def _request_event(self, endpoint: str, *, status_code: int | None, latency_ms: float | None, rate_limit_remaining: int | None, error: str | None = None, classification: str | None = None, reason_code: str | None = None, error_key: str | None = None, external_request: bool = True, requested_at: datetime | None = None, usage_id: str | None = None) -> None:
+        self.last_request_events.append({"endpoint": endpoint, "requested_at": requested_at or datetime.now(timezone.utc), "usage_id": usage_id, "status_code": status_code, "latency_ms": latency_ms, "rate_limit_remaining": rate_limit_remaining, "error": error, "error_category": classification, "reason_code": reason_code, "error_key": error_key, "cache_hit": False, "external_request": external_request})
 
     def _complete_attempt(self, reservation, *, status_code: int | None, latency_ms: float | None, rate_limit_remaining: int | None, error: str | None = None) -> None:
         self.quota.record(self.name, reservation)
@@ -182,28 +289,28 @@ class ApiSportsProvider:
         if not self.configured:
             self.last_error = "Provider not configured"
             self.last_status_code = None
-            raise ProviderError(self.name, self.last_error, category="missing", terminal=True, external_request=False)
+            raise ProviderError(self.name, self.last_error, category="missing", reason_code="provider_not_configured", terminal=True, external_request=False, endpoint=endpoint)
         if monotonic() < self.circuit_open_until:
             self.last_error = "Provider circuit is temporarily open"
             self.last_status_code = 503
             self.last_circuit_blocked = True
-            self._request_event(endpoint, status_code=503, latency_ms=0.0, rate_limit_remaining=None, error=self.last_error, external_request=False)
-            raise ProviderError(self.name, self.last_error, 503, category="temporarily_unavailable", terminal=True, external_request=False)
+            self._request_event(endpoint, status_code=503, latency_ms=0.0, rate_limit_remaining=None, error=self.last_error, classification="temporarily_unavailable", reason_code="circuit_open", error_key="circuit", external_request=False)
+            raise ProviderError(self.name, self.last_error, 503, category="temporarily_unavailable", reason_code="circuit_open", error_key="circuit", terminal=True, external_request=False, endpoint=endpoint)
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         for attempt in range(self.retry_attempts):
             if self.request_budget is not None and self.request_budget <= 0:
                 self.last_error = "Historical request budget reached"
                 self.last_status_code = 429
                 self.last_quota_blocked = True
-                self._request_event(endpoint, status_code=429, latency_ms=0.0, rate_limit_remaining=None, error=self.last_error, external_request=False)
-                raise ProviderError(self.name, self.last_error, 429, category="quota_exhausted", terminal=True, external_request=False)
+                self._request_event(endpoint, status_code=429, latency_ms=0.0, rate_limit_remaining=None, error=self.last_error, classification="quota_exhausted", reason_code="request_quota_exhausted", error_key="quota", external_request=False)
+                raise ProviderError(self.name, self.last_error, 429, category="quota_exhausted", reason_code="request_quota_exhausted", error_key="quota", terminal=True, external_request=False, endpoint=endpoint)
             reservation = self.quota.reserve(self.name, endpoint)
             if reservation is None:
                 self.last_error = "Configured quota limit reached"
                 self.last_status_code = 429
                 self.last_quota_blocked = True
-                self._request_event(endpoint, status_code=429, latency_ms=0.0, rate_limit_remaining=None, error=self.last_error, external_request=False)
-                raise ProviderError(self.name, self.last_error, 429, category="quota_exhausted", terminal=True, external_request=False)
+                self._request_event(endpoint, status_code=429, latency_ms=0.0, rate_limit_remaining=None, error=self.last_error, classification="quota_exhausted", reason_code="request_quota_exhausted", error_key="quota", external_request=False)
+                raise ProviderError(self.name, self.last_error, 429, category="quota_exhausted", reason_code="request_quota_exhausted", error_key="quota", terminal=True, external_request=False, endpoint=endpoint)
             started = perf_counter()
             requested_at = datetime.now(timezone.utc)
             if self.request_budget is not None: self.request_budget -= 1
@@ -221,8 +328,9 @@ class ApiSportsProvider:
                 attempt_remaining = self.last_rate_limit_remaining
                 if response.status_code == 429 or response.status_code >= 500:
                     self.last_error = f"Provider returned HTTP {response.status_code}"
+                    classification = classify_http_error(response.status_code)
                     self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
-                    self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error)
+                    self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error, classification=classification.category, reason_code=classification.reason_code, error_key=classification.error_key)
                     if attempt < self.retry_attempts - 1:
                         retry_after = response.headers.get("retry-after")
                         delay = self.retry_base_seconds * (2**attempt)
@@ -232,24 +340,32 @@ class ApiSportsProvider:
                         continue
                 if response.status_code >= 400:
                     self.last_error = f"Provider returned HTTP {response.status_code}"
+                    classification = classify_http_error(response.status_code)
                     if response.status_code < 500 and response.status_code != 429:
                         self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
-                        self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error)
-                    self._record_failure()
-                    category = "entitlement_unavailable" if response.status_code == 403 else "error" if response.status_code == 401 else "rate_limited" if response.status_code == 429 else "temporarily_unavailable"
-                    raise ProviderError(self.name, f"Provider returned HTTP {response.status_code}", response.status_code, category=category, terminal=response.status_code in {401, 403, 429})
+                        self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=self.last_error, classification=classification.category, reason_code=classification.reason_code, error_key=classification.error_key)
+                    if response.status_code >= 500:
+                        self._record_failure()
+                    raise ProviderError(self.name, self.last_error, response.status_code, category=classification.category, reason_code=classification.reason_code, error_key=classification.error_key, terminal=response.status_code < 500 or response.status_code == 429, retryable=response.status_code >= 500, endpoint=endpoint)
                 payload = response.json()
-                errors = payload.get("errors") if isinstance(payload, dict) else None
-                if errors:
-                    category = classify_api_error(errors)
-                    message = f"Provider API error ({category})"
+                if not isinstance(payload, dict):
+                    classification = ProviderErrorClassification("provider_error", "unknown_provider_error", "response")
+                    message = "Provider API error (provider_error)"
                     self.last_error = message
                     self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=message)
-                    self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=message)
+                    self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=message, classification=classification.category, reason_code=classification.reason_code, error_key=classification.error_key)
+                    raise ProviderError(self.name, message, response.status_code, category=classification.category, reason_code=classification.reason_code, error_key=classification.error_key, terminal=True, endpoint=endpoint)
+                errors = payload.get("errors") if isinstance(payload, dict) else None
+                if errors:
+                    classification = classify_api_error(errors)
+                    message = f"Provider API error ({classification.category})"
+                    self.last_error = message
+                    self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=message)
+                    self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining, error=message, classification=classification.category, reason_code=classification.reason_code, error_key=classification.error_key)
                     # HTTP 200 plus an API-level error is a terminal semantic
                     # response for this bounded operation, not a transport
                     # failure. Do not trip the circuit breaker.
-                    raise ProviderError(self.name, message, response.status_code, category=category, terminal=True, external_request=True)
+                    raise ProviderError(self.name, message, response.status_code, category=classification.category, reason_code=classification.reason_code, error_key=classification.error_key, terminal=True, retryable=False, external_request=True, endpoint=endpoint)
                 self.last_observed_at = datetime.now(timezone.utc)
                 self.last_success_at = self.last_observed_at
                 self.last_error = None
@@ -258,18 +374,18 @@ class ApiSportsProvider:
                 self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=response.status_code, latency_ms=self.last_latency_ms, rate_limit_remaining=self.last_rate_limit_remaining)
                 return payload
             except (httpx.HTTPError, ValueError) as exc:
-                self.last_error = str(exc)
+                self.last_error = "Provider request failed"
                 self.last_latency_ms = round((perf_counter() - started) * 1000, 2)
                 self._complete_attempt(reservation, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
-                self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error=self.last_error)
+                self._request_event(endpoint, requested_at=requested_at, usage_id=reservation.token if reservation.persistent else None, status_code=attempt_status, latency_ms=self.last_latency_ms, rate_limit_remaining=attempt_remaining, error="Provider request failed", classification="temporarily_unavailable", reason_code="provider_request_failed", error_key="transport")
                 self._record_failure()
                 if attempt < self.retry_attempts - 1:
                     delay = self.retry_base_seconds * (2**attempt)
                     await asyncio.sleep(delay + random.uniform(0, min(delay * 0.1, 0.25)))
                     continue
                 logger.warning("provider request failed provider=%s endpoint=%s", self.name, endpoint)
-                raise ProviderError(self.name, "Provider request failed") from exc
-        raise ProviderError(self.name, "Provider request failed")
+                raise ProviderError(self.name, "Provider request failed", category="temporarily_unavailable", reason_code="provider_request_failed", retryable=True, endpoint=endpoint) from exc
+        raise ProviderError(self.name, "Provider request failed", category="temporarily_unavailable", reason_code="provider_request_failed", retryable=True, endpoint=endpoint)
 
     async def _fixtures(self, params: dict[str, str]) -> list[NormalizedFixture]:
         self._reset_request_state()

@@ -195,3 +195,18 @@ async def test_api_football_league_season_uses_explicit_params(monkeypatch: pyte
     fixtures = await provider.football_fixtures_by_league_season("39", "2024")
     assert fixtures == []
     assert captured == {"league": "39", "season": "2024"}
+
+
+@pytest.mark.asyncio
+async def test_api_football_date_fixture_contract_keeps_season_optional(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = ApiSportsProvider(name="api-football", key="key", base_url="https://example.test", cache=MemoryCache(), quota=QuotaManager(mode="standard"))
+    captured = {}
+
+    async def fake_fixtures(params):
+        captured.update(params)
+        return []
+
+    monkeypatch.setattr(provider, "_fixtures", fake_fixtures)
+    fixtures = await provider.fixtures_by_date("2026-10-03", league="39")
+    assert fixtures == []
+    assert captured == {"date": "2026-10-03", "league": "39"}

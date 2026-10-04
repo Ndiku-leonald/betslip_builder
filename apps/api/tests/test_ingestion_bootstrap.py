@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 import app.main as main_module
 from app.cache import MemoryCache
 from app.db import Base
-from app.models import Competition, Fixture, FixtureFeatureSnapshot, Team
+from app.models import Competition, Fixture, FixtureFeatureSnapshot, ProviderHealth, ProviderUsage, Team
 from app.providers.api_sports import ApiSportsProvider, ProviderError
 from app.providers.base import NormalizedFixture
 from app.quota import QuotaManager
@@ -56,7 +56,7 @@ async def test_bounded_bootstrap_is_idempotent_for_canonical_entities():
 
 @pytest.mark.parametrize(
     ("status_code", "category"),
-    [(401, "error"), (403, "entitlement_unavailable"), (429, "rate_limited")],
+    [(401, "authentication_failed"), (403, "entitlement_unavailable"), (429, "rate_limited")],
 )
 @pytest.mark.asyncio
 async def test_bootstrap_stops_on_terminal_http_status_without_retrying_other_dates(status_code, category):
@@ -105,6 +105,52 @@ async def test_http_200_api_level_plan_error_is_terminal_without_opening_circuit
     assert provider.circuit_open_until == 0
     assert provider.last_request_events[0]["external_request"] is True
     assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("error_payload", "expected_category", "expected_reason", "expected_key"),
+    [
+        ({"plan": "date outside subscription window; credential=must-not-leak"}, "plan_restricted", "date_outside_subscription_window", "plan"),
+        ({"quota": "daily requests limit reached"}, "quota_exhausted", "daily_quota_exhausted", "quota"),
+        ({"rateLimit": "too many requests"}, "rate_limited", "rate_limit_exceeded", "rate_limit"),
+        ({"token": "invalid api key"}, "authentication_failed", "invalid_api_key", "authentication"),
+        ({"date": "invalid date format"}, "invalid_parameter", "invalid_date", "date"),
+        ({"season": "season is required"}, "missing_parameter", "season_required", "season"),
+        ({"league": "invalid league"}, "invalid_parameter", "invalid_league", "league"),
+        ({"mystery": "opaque provider detail secret=must-not-leak"}, "provider_error", "unknown_provider_error", None),
+        (["unexpected provider error secret=must-not-leak"], "provider_error", "unknown_provider_error", None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_http_200_error_shapes_produce_safe_structured_diagnostics(monkeypatch, error_payload, expected_category, expected_reason, expected_key):
+    import app.providers.api_sports as module
+
+    class Response:
+        status_code = 200
+        headers = {}
+        def json(self): return {"response": [], "errors": error_payload}
+
+    class Client:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def get(self, *args, **kwargs): return Response()
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", Client)
+    provider = ApiSportsProvider(name="api-football", key="configured", base_url="https://provider.test", cache=MemoryCache(), quota=QuotaManager(mode="standard"), retry_attempts=1)
+    with pytest.raises(ProviderError) as caught:
+        await provider.fixtures_by_date("2026-10-03", league="39")
+    diagnostic = caught.value.diagnostic()
+    assert diagnostic["classification"] == expected_category
+    assert diagnostic["reason_code"] == expected_reason
+    assert diagnostic["error_key"] == expected_key
+    assert diagnostic["status_code"] == 200
+    assert diagnostic["external_request"] is True
+    assert diagnostic["terminal"] is True
+    assert "must-not-leak" not in str(caught.value)
+    assert "must-not-leak" not in str(provider.last_request_events)
+    assert provider.consecutive_failures == 0
+    assert provider.circuit_open_until == 0
 
 
 @pytest.mark.parametrize(
@@ -168,6 +214,28 @@ async def test_http_200_empty_response_is_no_data_and_does_not_trip_circuit(monk
 
 
 @pytest.mark.asyncio
+async def test_empty_date_does_not_stop_later_permitted_dates():
+    engine = _engine()
+    provider = _provider()
+    calls = 0
+
+    async def dates(_date, league=None, season=None):
+        nonlocal calls
+        calls += 1
+        provider.last_request_events = [{"external_request": True}]
+        return [] if calls == 1 else [_fixture()]
+
+    provider.fixtures_by_date = dates
+    with Session(engine) as db:
+        result = await run_bootstrap(db, BootstrapScope(lookback_days=1, lookahead_days=1, include_statistics=False, include_odds=False), provider=provider, odds_provider=None, record_provider_event=lambda *args: None)
+        assert result.status == "completed"
+        assert result.provider_state is None
+        assert result.external_requests == 3
+        assert db.scalar(select(func.count()).select_from(Fixture)) == 1
+    assert calls == 3
+
+
+@pytest.mark.asyncio
 async def test_partial_bootstrap_persists_successful_dates_and_stops_after_terminal_failure():
     engine = _engine()
     provider = _provider()
@@ -209,6 +277,39 @@ async def test_open_circuit_stops_without_counting_external_request():
     assert result.status == "failed" and result.external_requests == 0
     assert calls == 1
     assert provider.last_request_events[0]["external_request"] is False
+
+
+def test_structured_provider_diagnostics_are_persisted_without_raw_messages(monkeypatch):
+    engine = _engine()
+    provider = main_module.providers["football"]
+    original_events = provider.last_request_events
+    original_configured = provider.configured
+    provider.configured = True
+    provider.last_request_events = [{
+        "endpoint": "fixtures",
+        "status_code": 200,
+        "latency_ms": 4.0,
+        "rate_limit_remaining": None,
+        "error": "Provider API error (invalid_parameter)",
+        "error_category": "invalid_parameter",
+        "reason_code": "season_required",
+        "error_key": "season",
+        "cache_hit": False,
+        "external_request": True,
+    }]
+    monkeypatch.setattr(main_module, "SessionLocal", lambda: Session(engine))
+    try:
+        main_module._record_usage(provider, "bootstrap/fixtures", status_code=200, error="raw secret=must-not-leak")
+        with Session(engine) as db:
+            usage = db.scalar(select(ProviderUsage).where(ProviderUsage.provider == provider.name))
+            health = db.scalar(select(ProviderHealth).where(ProviderHealth.provider == provider.name))
+        assert usage is not None and usage.error_category == "invalid_parameter" and usage.reason_code == "season_required" and usage.error_key == "season"
+        assert health is not None and health.state == "invalid_parameter" and health.reason_code == "season_required" and health.error_key == "season"
+        assert "must-not-leak" not in (usage.error or "")
+        assert "must-not-leak" not in (health.last_error or "")
+    finally:
+        provider.configured = original_configured
+        provider.last_request_events = original_events
 
 
 def test_bootstrap_auth_and_bounds(monkeypatch):

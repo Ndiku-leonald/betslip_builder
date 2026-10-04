@@ -31,6 +31,8 @@ class ProviderStatus(BaseModel):
     configured: bool
     healthy: bool
     state: str = "unknown"
+    reason_code: str | None = None
+    error_key: str | None = None
     last_success_at: datetime | None
     last_error: str | None
     latency_ms: float | None

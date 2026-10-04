@@ -1008,8 +1008,12 @@ async def api_football_status(_admin: None = Depends(require_admin)) -> dict:
             "reason_code": exc.reason_code or "provider_error",
             "error_key": exc.error_key,
             "error_shape": exc.error_shape,
+            "error_entry_count": exc.error_entry_count,
             "semantic_tags": list(exc.semantic_tags),
+            "diagnostic_truncated": exc.diagnostic_truncated,
         }
+        if exc.status_diagnostics:
+            diagnostic.update(exc.status_diagnostics)
         return JSONResponse(
             status_code=503,
             content={

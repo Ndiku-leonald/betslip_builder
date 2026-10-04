@@ -227,8 +227,47 @@ def classify_http_error(status_code: int) -> ProviderErrorClassification:
     return ProviderErrorClassification("provider_error", "provider_http_error", "status")
 
 
+_STATUS_SECTION_ORDER = ("account", "subscription", "requests")
+_STATUS_SUBSCRIPTION_FIELD_ORDER = ("plan", "end", "active")
+_STATUS_REQUEST_FIELD_ORDER = ("current", "limit_day")
+
+
+def _status_response_shape(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "list"
+    return "malformed"
+
+
+def _status_envelope_diagnostics(value: Any) -> dict[str, Any]:
+    candidate: dict[str, Any] | None = value if isinstance(value, dict) else None
+    entry_count = 1 if isinstance(value, dict) else min(len(value), _MAX_ERROR_ENTRIES) if isinstance(value, list) else 0
+    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
+        candidate = value[0]
+    sections = [name for name in _STATUS_SECTION_ORDER if candidate is not None and name in candidate]
+    subscription = candidate.get("subscription") if candidate and isinstance(candidate.get("subscription"), dict) else {}
+    requests = candidate.get("requests") if candidate and isinstance(candidate.get("requests"), dict) else {}
+    return {
+        "response_shape": _status_response_shape(value),
+        "response_entry_count": entry_count,
+        "account_section_present": "account" in sections,
+        "status_sections_present": sections,
+        "subscription_fields_present": [name for name in _STATUS_SUBSCRIPTION_FIELD_ORDER if name in subscription],
+        "request_fields_present": [name for name in _STATUS_REQUEST_FIELD_ORDER if name in requests],
+    }
+
+
 class ProviderError(RuntimeError):
-    def __init__(self, provider: str, message: str, status_code: int | None = None, *, category: str | None = None, reason_code: str | None = None, error_key: str | None = None, error_shape: str | None = None, error_entry_count: int = 0, semantic_tags: tuple[str, ...] = (), diagnostic_truncated: bool = False, terminal: bool = False, retryable: bool = False, external_request: bool | None = None, endpoint: str | None = None) -> None:
+    def __init__(self, provider: str, message: str, status_code: int | None = None, *, category: str | None = None, reason_code: str | None = None, error_key: str | None = None, error_shape: str | None = None, error_entry_count: int = 0, semantic_tags: tuple[str, ...] = (), diagnostic_truncated: bool = False, status_diagnostics: dict[str, Any] | None = None, terminal: bool = False, retryable: bool = False, external_request: bool | None = None, endpoint: str | None = None) -> None:
         super().__init__(message)
         self.provider = provider
         self.status_code = status_code
@@ -239,13 +278,14 @@ class ProviderError(RuntimeError):
         self.error_entry_count = min(max(error_entry_count, 0), _MAX_ERROR_ENTRIES)
         self.semantic_tags = tuple(tag for tag in semantic_tags if tag in _SEMANTIC_TAG_ORDER)
         self.diagnostic_truncated = diagnostic_truncated
+        self.status_diagnostics = dict(status_diagnostics) if status_diagnostics else None
         self.terminal = terminal
         self.retryable = retryable
         self.external_request = external_request
         self.endpoint = endpoint
 
     def diagnostic(self, *, endpoint: str | None = None) -> dict[str, Any]:
-        return {
+        diagnostic = {
             "provider": self.provider,
             "endpoint": endpoint or self.endpoint,
             "classification": self.category or "provider_error",
@@ -260,6 +300,9 @@ class ProviderError(RuntimeError):
             "terminal": self.terminal,
             "retryable": self.retryable,
         }
+        if self.status_diagnostics:
+            diagnostic.update(self.status_diagnostics)
+        return diagnostic
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -428,8 +471,10 @@ class ApiSportsProvider:
 
     @classmethod
     def _parse_account_status(cls, payload: dict[str, Any]) -> dict[str, Any]:
-        response = payload.get("response")
-        if not isinstance(response, dict):
+        raw_response = payload.get("response")
+        status_diagnostics = _status_envelope_diagnostics(raw_response)
+        response = raw_response if isinstance(raw_response, dict) else raw_response[0] if isinstance(raw_response, list) and len(raw_response) == 1 and isinstance(raw_response[0], dict) else None
+        if response is None:
             raise ProviderError(
                 "api-football",
                 "Provider API error (malformed_response)",
@@ -437,6 +482,7 @@ class ApiSportsProvider:
                 reason_code="malformed_response",
                 error_key="response",
                 error_shape="malformed_response",
+                status_diagnostics=status_diagnostics,
                 terminal=True,
                 external_request=False,
                 endpoint="status",
@@ -449,14 +495,13 @@ class ApiSportsProvider:
 
         current = cls._safe_status_int(requests.get("current"))
         limit_day = cls._safe_status_int(requests.get("limit_day"))
-        remaining = cls._safe_status_int(requests.get("remaining"))
-        if remaining is None and current is not None and limit_day is not None:
-            remaining = max(0, limit_day - current)
+        remaining = max(0, limit_day - current) if current is not None and limit_day is not None else None
 
         # The provider also returns response.account with PII. It is intentionally
         # never copied into a local safe structure and is explicitly discarded.
         account = response.get("account")
         del account
+        raw_response = None
         del payload
 
         safe_subscription = {
@@ -469,6 +514,7 @@ class ApiSportsProvider:
             "limit_day": limit_day,
             "remaining": remaining,
         }
+        account = None
         subscription = None
         requests = None
         response = None
@@ -512,6 +558,7 @@ class ApiSportsProvider:
                 error_entry_count=exc.error_entry_count,
                 semantic_tags=exc.semantic_tags,
                 diagnostic_truncated=exc.diagnostic_truncated,
+                status_diagnostics=exc.status_diagnostics,
                 terminal=exc.terminal,
                 retryable=exc.retryable,
                 external_request=exc.reason_code != "provider_not_configured",

@@ -119,6 +119,63 @@ async def test_status_missing_request_fields_are_safe_nulls(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_status_supports_narrow_one_item_response_list(monkeypatch):
+    _mock_response(monkeypatch, {"errors": {}, "response": [{"subscription": {"plan": "free", "active": True}, "requests": {"current": 4, "limit_day": 10}}]})
+    result = await _provider().account_status()
+    assert result["requests"] == {"current": 4, "limit_day": 10, "remaining": 6}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "shape", "entry_count"),
+    [([], "list", 0), ([{}, {}], "list", 2), (None, "null", 0), ("opaque", "string", 0), (17, "number", 0)],
+)
+async def test_status_structural_failures_are_bounded_and_secret_free(monkeypatch, response, shape, entry_count):
+    fake_secret = "STRUCTURAL_STATUS_SECRET"
+    _mock_response(monkeypatch, {"errors": None, "response": response, "unknown": fake_secret})
+    with pytest.raises(ProviderError) as caught:
+        await _provider().account_status()
+    diagnostic = caught.value.diagnostic()
+    assert diagnostic["reason_code"] == "malformed_response"
+    assert diagnostic["response_shape"] == shape
+    assert diagnostic["response_entry_count"] == entry_count
+    assert diagnostic["status_sections_present"] == []
+    assert fake_secret not in str(caught.value)
+    assert fake_secret not in repr(diagnostic)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("errors", [{}, [], None])
+async def test_status_empty_errors_are_not_provider_errors(monkeypatch, errors):
+    _mock_response(monkeypatch, {"errors": errors, "response": {"subscription": {"plan": "free", "active": True}, "requests": {"current": 1, "limit_day": 2}}})
+    result = await _provider().account_status()
+    assert result["requests"]["remaining"] == 1
+
+
+@pytest.mark.asyncio
+async def test_status_clamps_remaining_and_rejects_malformed_numeric_values(monkeypatch):
+    _mock_response(monkeypatch, {"errors": [], "response": {"subscription": {"plan": "free", "active": True}, "requests": {"current": 101, "limit_day": 100}}})
+    result = await _provider().account_status()
+    assert result["requests"] == {"current": 101, "limit_day": 100, "remaining": 0}
+
+    _mock_response(monkeypatch, {"errors": [], "response": {"subscription": {"plan": "free", "active": True}, "requests": {"current": "101", "limit_day": 100}}})
+    result = await _provider().account_status()
+    assert result["requests"] == {"current": None, "limit_day": 100, "remaining": None}
+
+
+@pytest.mark.asyncio
+async def test_status_does_not_mutate_ingestion_circuit_or_provider_state(monkeypatch):
+    provider = _provider()
+    provider.consecutive_failures = 3
+    provider.circuit_open_until = 123.0
+    provider.last_error = "existing-safe-error"
+    previous = (provider.consecutive_failures, provider.circuit_open_until, provider.last_error, provider.calls_today, provider.quota.calls.copy())
+    _mock_response(monkeypatch, {"errors": [], "response": {"subscription": {"plan": "free", "active": True}, "requests": {"current": 1, "limit_day": 2}}})
+    await provider.account_status()
+    assert (provider.consecutive_failures, provider.circuit_open_until, provider.last_error, provider.calls_today, provider.quota.calls) == previous
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("payload", [["opaque"], {"errors": [], "response": "opaque"}])
 async def test_status_malformed_response_is_controlled(monkeypatch, payload):
     _mock_response(monkeypatch, payload)
@@ -205,3 +262,34 @@ def test_status_endpoint_returns_controlled_provider_error(monkeypatch, caplog):
     assert body["diagnostic"]["reason_code"] == "unknown_provider_error"
     assert "raw" not in response.text.lower()
     assert "admin-test-token" not in caplog.text
+
+
+def test_status_endpoint_returns_safe_structural_diagnostics(monkeypatch):
+    async def status():
+        raise ProviderError(
+            "api-football",
+            "Provider API error (malformed_response)",
+            200,
+            category="provider_error",
+            reason_code="malformed_response",
+            error_key="response",
+            error_shape="malformed_response",
+            status_diagnostics={
+                "response_shape": "list",
+                "response_entry_count": 2,
+                "account_section_present": False,
+                "status_sections_present": [],
+                "subscription_fields_present": [],
+                "request_fields_present": [],
+            },
+            endpoint="status",
+        )
+
+    monkeypatch.setattr(main_module.settings, "admin_token", "admin-test-token")
+    monkeypatch.setattr(main_module.football, "account_status", status)
+    response = TestClient(main_module.app).get("/admin/providers/api-football/status", headers={"Authorization": "Bearer admin-test-token"})
+    body = response.json()
+    assert response.status_code == 503
+    assert body["diagnostic"]["response_shape"] == "list"
+    assert body["diagnostic"]["response_entry_count"] == 2
+    assert body["diagnostic"]["status_sections_present"] == []

@@ -219,9 +219,9 @@ def test_api_build_retrieval_explain_history_and_leg_removal_use_persisted_snaps
         with Session(engine) as db: yield db
     main_module.app.dependency_overrides[get_db] = override_db
     try:
-        # Seeded fixtures begin ten minutes after now; use their local
-        # calendar day so the test remains stable near midnight in Africa/Kampala.
-        day = (now + timedelta(hours=2)).astimezone(ZoneInfo("Africa/Kampala")).date().isoformat()
+        # Seeded fixtures begin ten minutes after now; derive the request day
+        # from that same window so the test remains stable near local midnight.
+        day = (now + timedelta(minutes=10)).astimezone(ZoneInfo("Africa/Kampala")).date().isoformat()
         client = TestClient(main_module.app)
         response = client.post("/api/slips/build", json={"sports": ["football"], "start_date": day, "end_date": day, "target_odds": 3, "profile": "balanced", "max_legs": 3, "min_legs": 2})
         assert response.status_code == 200 and response.json()["slips"]

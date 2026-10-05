@@ -47,9 +47,7 @@ async def require_admin(request: Request) -> None:
     if not settings.enable_admin_endpoints:
         raise HTTPException(status_code=404, detail="Not found")
     if not settings.admin_token:
-        if settings.app_env == "production":
-            raise HTTPException(status_code=503, detail="Administrative access is not configured")
-        return
+        raise HTTPException(status_code=503, detail="Administrative access is not configured")
     supplied = request.headers.get("authorization", "")
     token = supplied[7:] if supplied.lower().startswith("bearer ") else None
     if not constant_time_token(settings.admin_token, token):

@@ -34,6 +34,13 @@ def _mapping(db: Session, provider: str, entity_type: str, provider_id: str, int
         item.internal_entity_id = internal_id
 
 
+def _mapped_entity(db: Session, model, provider: str, entity_type: str, provider_id: str | None):
+    if not provider_id:
+        return None
+    mapping = db.scalar(select(ProviderEntityMapping).filter_by(provider=provider, entity_type=entity_type, provider_entity_id=provider_id))
+    return db.get(model, mapping.internal_entity_id) if mapping is not None else None
+
+
 def ingest_fixtures(db: Session, items: list[NormalizedFixture]) -> int:
     for item in items:
         observed_at = item.observed_at or datetime.now(timezone.utc)
@@ -41,13 +48,18 @@ def ingest_fixtures(db: Session, items: list[NormalizedFixture]) -> int:
         country = None
         if item.country_name:
             country = _get_or_create(db, Country, {"name": item.country_name}, {"code": None})
-        competition_filters = {"sport_id": sport.id, "name": item.competition_name}
-        if item.competition_provider_id:
-            competition_filters["provider_id"] = item.competition_provider_id
-        competition_values = {"country_id": country.id if country else None}
-        if "provider_id" not in competition_filters:
-            competition_values["provider_id"] = item.competition_provider_id
-        competition = _get_or_create(db, Competition, competition_filters, competition_values)
+        competition_key = item.competition_provider_id or item.competition_name
+        competition = _mapped_entity(db, Competition, item.provider, "competition", competition_key)
+        if competition is None:
+            competition_filters = {"sport_id": sport.id, "name": item.competition_name}
+            if item.competition_provider_id:
+                competition_filters["provider_id"] = item.competition_provider_id
+            competition_values = {"country_id": country.id if country else None}
+            if "provider_id" not in competition_filters:
+                competition_values["provider_id"] = item.competition_provider_id
+            competition = _get_or_create(db, Competition, competition_filters, competition_values)
+        elif country is not None:
+            competition.country_id = country.id
         season = None
         if item.season_name:
             season = _get_or_create(
@@ -56,8 +68,16 @@ def ingest_fixtures(db: Session, items: list[NormalizedFixture]) -> int:
                 {"competition_id": competition.id, "name": item.season_name},
                 {"provider_id": item.season_name},
             )
-        home = _get_or_create(db, Team, {"sport_id": sport.id, "name": item.home_name}, {"short_name": None, "logo_url": None})
-        away = _get_or_create(db, Team, {"sport_id": sport.id, "name": item.away_name}, {"short_name": None, "logo_url": None})
+        home = _mapped_entity(db, Team, item.provider, "team", item.home_provider_id)
+        if home is None:
+            home = _get_or_create(db, Team, {"sport_id": sport.id, "name": item.home_name}, {"short_name": None, "logo_url": None})
+        else:
+            home.name = item.home_name
+        away = _mapped_entity(db, Team, item.provider, "team", item.away_provider_id)
+        if away is None:
+            away = _get_or_create(db, Team, {"sport_id": sport.id, "name": item.away_name}, {"short_name": None, "logo_url": None})
+        else:
+            away.name = item.away_name
         _mapping(db, item.provider, "team", item.home_provider_id, home.id)
         _mapping(db, item.provider, "team", item.away_provider_id, away.id)
         _mapping(db, item.provider, "competition", item.competition_provider_id or item.competition_name, competition.id)

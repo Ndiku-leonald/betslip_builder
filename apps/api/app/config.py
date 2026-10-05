@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     football_data_api_key: str | None = None
     football_data_base_url: str = "https://api.football-data.org/v4"
     football_data_daily_limit: int | None = None
+    football_primary_provider: Literal["api-football", "football-data"] = "api-football"
     additional_provider_1_name: str | None = None
     additional_provider_1_sports: str | None = None
     additional_provider_1_base_url: str | None = None

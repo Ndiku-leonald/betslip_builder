@@ -84,6 +84,18 @@ def test_admin_endpoint_rejects_bearer_token_in_production(monkeypatch) -> None:
         main_module.settings.admin_token = original_token
 
 
+def test_admin_endpoint_fails_closed_when_token_is_missing(monkeypatch) -> None:
+    from app import main as main_module
+    original_token = main_module.settings.admin_token
+    monkeypatch.setattr(main_module.settings, "admin_token", None)
+    try:
+        response = TestClient(app).get("/admin/providers/football-data/status")
+        assert response.status_code == 503
+        assert "token" not in response.text.lower()
+    finally:
+        main_module.settings.admin_token = original_token
+
+
 def test_production_worker_role_is_the_only_scheduler_role(monkeypatch) -> None:
     import asyncio
     from app import main as main_module

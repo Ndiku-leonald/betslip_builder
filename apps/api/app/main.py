@@ -43,7 +43,7 @@ from app.live.backtest import evaluate_live_backtest
 from app.live.throttle import claim_refresh
 from app.prediction.service import PredictionService, PredictionUnavailable
 from app.services.ingestion import ingest_fixtures
-from app.services.bootstrap import BootstrapScope, provider_state, run_bootstrap
+from app.services.bootstrap import BootstrapScope, FOOTBALL_DATA_COMPETITION, FOOTBALL_DATA_MAX_LOOKAHEAD_DAYS, FOOTBALL_DATA_MAX_LOOKBACK_DAYS, provider_state, run_bootstrap, run_football_data_bootstrap
 from app.slips.config import PROFILE_CONFIG
 from app.slips.optimizer import SlipOptimizer
 from app.observability import Metrics, configure_logging
@@ -60,6 +60,7 @@ football = ApiSportsProvider(name="api-football", key=settings.api_football_key 
 basketball = ApiSportsProvider(name="api-basketball", key=settings.api_basketball_key or api_sports_key, base_url=settings.api_basketball_base_url, cache=cache, quota=quota, **provider_options)
 providers = {"football": football, "basketball": basketball}
 football_data = FootballDataProvider(settings.football_data_api_key, base_url=settings.football_data_base_url, cache=cache, quota=quota, timeout=settings.provider_read_timeout)
+football_providers = {"api-football": football, "football-data": football_data}
 secondary_football = LiveScoreFootballProvider(settings.livescore_football_base_url, cache=cache) if settings.enable_livescore_football else None
 experimental_football = EasySoccerDataProvider(settings.enable_easy_soccer_data)
 odds_provider = TheOddsApiProvider(settings.the_odds_api_key, base_url=settings.the_odds_api_base_url, quota=quota) if settings.enable_odds_api else None
@@ -74,6 +75,14 @@ live_service = LiveIntelligenceService()
 slip_optimizer = SlipOptimizer()
 _bootstrap_lock = Lock()
 _ingestion_status: dict = {"status": "idle", "started_at": None, "finished_at": None}
+
+
+def football_primary_provider() -> ApiSportsProvider | FootballDataProvider:
+    return football_providers[settings.football_primary_provider]
+
+
+def provider_for_sport(sport: str) -> ApiSportsProvider | FootballDataProvider:
+    return football_primary_provider() if sport == "football" else providers[sport]
 
 
 def _app_today() -> date:
@@ -210,7 +219,7 @@ def _set_provider_health_state(provider_name: str, state: str | None, reason_cod
 
 
 async def _scheduled_today(sport: str) -> None:
-    provider = providers[sport]
+    provider = provider_for_sport(sport)
     if not provider.configured:
         return
     try:
@@ -223,7 +232,9 @@ async def _scheduled_today(sport: str) -> None:
 
 
 async def _scheduled_live(sport: str) -> None:
-    provider = providers[sport]
+    if sport == "football" and settings.football_primary_provider == "football-data":
+        return
+    provider = provider_for_sport(sport)
     if not provider.configured:
         return
     try:
@@ -266,7 +277,7 @@ async def start_scheduler() -> None:
         scheduler = AsyncIOScheduler(timezone=settings.app_timezone)
         scheduler.add_job(_scheduled_today, "interval", minutes=settings.prematch_refresh_minutes, args=["football"], id="football-today", replace_existing=True)
         scheduler.add_job(_scheduled_today, "interval", minutes=settings.prematch_refresh_minutes, args=["basketball"], id="basketball-today", replace_existing=True)
-        if settings.quota_mode != "free":
+        if settings.quota_mode != "free" and settings.football_primary_provider == "api-football":
             scheduler.add_job(_scheduled_live, "interval", seconds=settings.live_poll_seconds, args=["football"], id="football-live", replace_existing=True)
             scheduler.add_job(_scheduled_live, "interval", seconds=settings.live_poll_seconds, args=["basketball"], id="basketball-live", replace_existing=True)
         scheduler.start()
@@ -1036,6 +1047,13 @@ async def football_data_status(_admin: None = Depends(require_admin)) -> dict:
 async def ingestion_bootstrap(request: IngestionBootstrapRequest, _admin: None = Depends(require_admin)) -> dict:
     """Run one small, explicit real-provider bootstrap for staging."""
     global _ingestion_status
+    selected_provider = provider_for_sport(request.sport)
+    if isinstance(selected_provider, FootballDataProvider) and (
+        request.competition not in {None, FOOTBALL_DATA_COMPETITION, "39"}
+        or request.lookback_days > FOOTBALL_DATA_MAX_LOOKBACK_DAYS
+        or request.lookahead_days > FOOTBALL_DATA_MAX_LOOKAHEAD_DAYS
+    ):
+        raise HTTPException(status_code=422, detail="football-data.org bootstrap is limited to PL with lookback_days<=1 and lookahead_days<=3")
     if not _bootstrap_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail={"code": "INGESTION_BUSY", "message": "An ingestion operation is already running."})
     started = datetime.now(timezone.utc)
@@ -1050,10 +1068,14 @@ async def ingestion_bootstrap(request: IngestionBootstrapRequest, _admin: None =
                 else:
                     _record_generic_usage(provider, endpoint, status_code, error)
 
-            result = await run_bootstrap(db, scope, provider=providers[scope.sport], odds_provider=odds_provider, record_provider_event=record_event)
+            if isinstance(selected_provider, FootballDataProvider):
+                scope = BootstrapScope(**{**request.model_dump(), "competition": FOOTBALL_DATA_COMPETITION})
+                result = await run_football_data_bootstrap(db, scope, provider=selected_provider, record_provider_event=record_event)
+            else:
+                result = await run_bootstrap(db, scope, provider=selected_provider, odds_provider=odds_provider, record_provider_event=record_event)
         finally:
             db.close()
-        _set_provider_health_state(providers[scope.sport].name, result.provider_state, result.provider_reason_code)
+        _set_provider_health_state(selected_provider.name, result.provider_state, result.provider_reason_code)
         finished = datetime.now(timezone.utc)
         payload = {**result.as_dict(), "started_at": started, "finished_at": finished}
         _ingestion_status = payload
@@ -1063,7 +1085,7 @@ async def ingestion_bootstrap(request: IngestionBootstrapRequest, _admin: None =
     except Exception:
         logging.getLogger(__name__).exception("bounded ingestion bootstrap failed")
         finished = datetime.now(timezone.utc)
-        _ingestion_status = {"status": "failed", "started_at": started, "finished_at": finished, "sport": request.sport, "scope": request.model_dump(), "providers_attempted": [providers[request.sport].name], "providers_succeeded": [], "providers_unavailable": [], "warnings": ["Bootstrap failed before a safe summary could be produced."], "error_category": "internal_error"}
+        _ingestion_status = {"status": "failed", "started_at": started, "finished_at": finished, "sport": request.sport, "scope": request.model_dump(), "providers_attempted": [selected_provider.name], "providers_succeeded": [], "providers_unavailable": [], "warnings": ["Bootstrap failed before a safe summary could be produced."], "error_category": "internal_error"}
         raise HTTPException(status_code=500, detail={"code": "INGESTION_FAILED", "message": "Ingestion bootstrap failed."})
     finally:
         _bootstrap_lock.release()
@@ -1076,20 +1098,29 @@ def ingestion_status(_admin: None = Depends(require_admin)) -> dict:
 
 @app.post("/api/ingestion/today")
 async def ingest_today(sport: str = Query(..., pattern="^(football|basketball)$"), db: Session = Depends(get_db), _admin: None = Depends(require_admin)) -> dict:
-    provider = providers[sport]
+    provider = provider_for_sport(sport)
     date = _app_today().isoformat()
     try:
-        items = await provider.fixtures_by_date(date)
+        if isinstance(provider, FootballDataProvider):
+            items = await provider.fixtures_by_date(date, league=FOOTBALL_DATA_COMPETITION)
+        else:
+            items = await provider.fixtures_by_date(date)
     except ProviderError as exc:
         _record_usage(provider, "fixtures", status_code=exc.status_code, error=str(exc))
         raise HTTPException(503, {"code": "provider_error", "provider": exc.provider, "message": str(exc)}) from exc
+    except FootballDataError as exc:
+        reason_code = exc.reason_code or "provider_error"
+        _record_generic_usage(provider, "fixtures", exc.status_code, reason_code)
+        raise HTTPException(503, {"code": reason_code, "provider": provider.name, "message": reason_code}) from exc
     _record_usage(provider, "fixtures", status_code=200)
     return {"sport": sport, "date": date, "upserted": ingest_fixtures(db, items), "provider": provider.name}
 
 
 @app.post("/api/ingestion/live")
 async def ingest_live(sport: str = Query(..., pattern="^(football|basketball)$"), db: Session = Depends(get_db), _admin: None = Depends(require_admin)) -> dict:
-    provider = providers[sport]
+    if sport == "football" and settings.football_primary_provider == "football-data":
+        raise HTTPException(status_code=409, detail="Live football ingestion is disabled for football-data.org")
+    provider = provider_for_sport(sport)
     try:
         items = await provider.live_fixtures()
     except ProviderError as exc:

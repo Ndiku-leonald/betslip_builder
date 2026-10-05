@@ -6,7 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.config import get_settings
-from app.main import providers
+from app.main import basketball, football_primary_provider
 from app.providers.api_sports import ApiSportsProvider, ProviderError
 
 
@@ -69,8 +69,13 @@ async def run_provider(label: str, provider: ApiSportsProvider, detail_kind: str
 
 
 async def main() -> int:
-    football_ok = await run_provider("API-Football", providers["football"], "stats", "fixture detail")
-    basketball_ok = await run_provider("API-Basketball", providers["basketball"], "stats", "statistics")
+    football_provider = football_primary_provider()
+    if football_provider.name == "api-football":
+        football_ok = await run_provider("API-Football", football_provider, "stats", "fixture detail")
+    else:
+        report("football-data.org", "SKIPPED", "canonical provider has no detail/statistics smoke path")
+        football_ok = True
+    basketball_ok = await run_provider("API-Basketball", basketball, "stats", "statistics")
     return 0 if football_ok and basketball_ok else 1
 
 

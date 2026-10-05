@@ -22,6 +22,7 @@ from app.markets.storage import persist_market_snapshots
 from app.models import Competition, Fixture, FixtureFeatureSnapshot, Sport, Team
 from app.odds.providers import OddsApiError, TheOddsApiProvider, parse_the_odds_api
 from app.providers.api_sports import ApiSportsProvider, ProviderError, _parse_dt
+from app.providers.football_data import FootballDataError, FootballDataProvider
 from app.providers.matching import match_fixture
 from app.services.ingestion import ingest_fixtures
 
@@ -30,6 +31,9 @@ MAX_LOOKBACK_DAYS = 7
 MAX_LOOKAHEAD_DAYS = 7
 MAX_STATISTICS_FIXTURES = 5
 MAX_DAILY_FIXTURE_REQUESTS = MAX_LOOKBACK_DAYS + MAX_LOOKAHEAD_DAYS + 1
+FOOTBALL_DATA_COMPETITION = "PL"
+FOOTBALL_DATA_MAX_LOOKBACK_DAYS = 1
+FOOTBALL_DATA_MAX_LOOKAHEAD_DAYS = 3
 
 
 @dataclass(frozen=True)
@@ -130,6 +134,97 @@ def _date_range(scope: BootstrapScope, today: date) -> list[str]:
 
 def _is_terminal_provider_error(exc: ProviderError) -> bool:
     return exc.terminal or exc.status_code in {401, 403, 429}
+
+
+def _football_data_state(exc: FootballDataError) -> str:
+    if exc.category:
+        return exc.category
+    if exc.status_code == 401:
+        return "authentication_failed"
+    if exc.status_code == 403:
+        return "plan_restricted"
+    if exc.status_code == 429:
+        return "rate_limited"
+    if exc.status_code is not None and exc.status_code >= 500:
+        return "provider_unavailable"
+    return "transport_failure" if exc.status_code is None else "provider_error"
+
+
+async def run_football_data_bootstrap(
+    db: Session,
+    scope: BootstrapScope,
+    *,
+    provider: FootballDataProvider,
+    record_provider_event: Callable[[Any, str, int | None, str | None], None],
+) -> BootstrapResult:
+    """Ingest one bounded Premier League window without stats, odds, or models."""
+    result = BootstrapResult(sport=scope.sport, scope={
+        "competition": FOOTBALL_DATA_COMPETITION,
+        "lookback_days": scope.lookback_days,
+        "lookahead_days": scope.lookahead_days,
+        "include_statistics": False,
+        "include_odds": False,
+        "max_fixture_requests": 1,
+    })
+    result.providers_attempted.append(provider.name)
+    if scope.sport != "football" or scope.competition not in {None, FOOTBALL_DATA_COMPETITION, "39"}:
+        result.status = "failed"
+        result.error_category = "invalid_scope"
+        result.provider_state = "invalid_scope"
+        result.provider_reason_code = "premier_league_only"
+        result.warnings.append("football-data.org bootstrap is restricted to the Premier League (PL).")
+        return result
+    if scope.lookback_days > FOOTBALL_DATA_MAX_LOOKBACK_DAYS or scope.lookahead_days > FOOTBALL_DATA_MAX_LOOKAHEAD_DAYS:
+        result.status = "failed"
+        result.error_category = "invalid_scope"
+        result.provider_state = "invalid_scope"
+        result.provider_reason_code = "bounded_window_exceeded"
+        result.warnings.append("football-data.org bootstrap is bounded to one lookback day and three lookahead days.")
+        return result
+    if not provider.configured:
+        result.status = "failed"
+        result.error_category = "missing"
+        result.provider_state = "missing"
+        result.provider_reason_code = "provider_not_configured"
+        result.providers_unavailable.append({"provider": provider.name, "state": "missing"})
+        result.warnings.append("Primary provider credentials are not configured.")
+        return result
+
+    before = {model: _count(db, model) for model in (Competition, Team, Fixture)}
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=scope.lookback_days)
+    end = today + timedelta(days=scope.lookahead_days)
+    try:
+        items = await provider.fixtures_by_window(start.isoformat(), end.isoformat(), league=FOOTBALL_DATA_COMPETITION)
+        result.external_requests = 1 if provider.last_external_request else 0
+        record_provider_event(provider, "bootstrap/matches", provider.last_status_code or 200, None)
+        result.providers_succeeded.append(provider.name)
+    except FootballDataError as exc:
+        result.external_requests = 1 if provider.last_external_request else 0
+        record_provider_event(provider, "bootstrap/matches", exc.status_code, str(exc))
+        state = _football_data_state(exc)
+        result.status = "failed"
+        result.error_category = state
+        result.provider_state = state
+        result.provider_reason_code = exc.reason_code or "provider_error"
+        result.providers_unavailable.append({"provider": provider.name, "state": state})
+        result.warnings.append(f"{provider.name} unavailable during fixture ingestion ({state}).")
+        return result
+
+    if items:
+        result.fixtures_written = ingest_fixtures(db, items)
+        result.competitions_written = max(0, _count(db, Competition) - before[Competition])
+        result.teams_written = max(0, _count(db, Team) - before[Team])
+    else:
+        result.provider_state = "no_data"
+        result.provider_reason_code = "no_matches_in_window"
+        result.warnings.append("Provider returned no Premier League fixtures for the bounded period.")
+    if scope.include_statistics:
+        result.warnings.append("football-data.org statistics are not available in this canonical ingestion path; statistics were skipped.")
+    if scope.include_odds:
+        result.warnings.append("Odds ingestion is disabled for this canonical bootstrap; no odds provider was called.")
+    result.warnings.append("Training, model promotion, predictions, and recommendations were not run.")
+    return result
 
 
 def _odds_sport_key(scope: BootstrapScope) -> str | None:

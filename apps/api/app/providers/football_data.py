@@ -20,9 +20,12 @@ from app.quota import QuotaManager
 
 
 class FootballDataError(RuntimeError):
-    def __init__(self, message: str, status_code: int | None = None) -> None:
+    def __init__(self, message: str, status_code: int | None = None, *, category: str | None = None, reason_code: str | None = None, external_request: bool = False) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.category = category
+        self.reason_code = reason_code
+        self.external_request = external_request
 
 
 def _safe_header_int(headers: Any, name: str, *, maximum: int = 2_147_483_647) -> int | None:
@@ -51,28 +54,35 @@ def _status(value: str | None) -> str:
 
 
 def normalize_match(payload: dict[str, Any]) -> NormalizedFixture:
+    if not isinstance(payload, dict):
+        raise FootballDataError("Provider response was malformed", category="malformed_response", reason_code="match_payload_malformed")
+    competition = payload.get("competition")
+    home_team = payload.get("homeTeam")
+    away_team = payload.get("awayTeam")
+    if not payload.get("id") or not isinstance(competition, dict) or competition.get("id") is None or not competition.get("name") or not isinstance(home_team, dict) or home_team.get("id") is None or not home_team.get("name") or not isinstance(away_team, dict) or away_team.get("id") is None or not away_team.get("name"):
+        raise FootballDataError("Provider response was malformed", category="malformed_response", reason_code="match_payload_malformed")
     score = payload.get("score") or {}
-    full_time = score.get("fullTime") or {}
-    current = score.get("duration") or score.get("halfTime") or {}
+    full_time = score.get("fullTime") if isinstance(score, dict) and isinstance(score.get("fullTime"), dict) else {}
+    half_time = score.get("halfTime") if isinstance(score, dict) and isinstance(score.get("halfTime"), dict) else {}
     status = str(payload.get("status") or "")
     minute = payload.get("minute")
     return NormalizedFixture(
         provider="football-data.org",
         provider_fixture_id=str(payload.get("id")),
         sport="football",
-        competition_name=str((payload.get("competition") or {}).get("name") or "Unknown competition"),
-        competition_provider_id=str((payload.get("competition") or {}).get("id")) if (payload.get("competition") or {}).get("id") is not None else None,
+        competition_name=str(competition["name"]),
+        competition_provider_id=str(competition["id"]),
         country_name=str((payload.get("area") or {}).get("name")) if (payload.get("area") or {}).get("name") else None,
         season_name=str((payload.get("season") or {}).get("startDate")) if (payload.get("season") or {}).get("startDate") else None,
-        home_provider_id=str((payload.get("homeTeam") or {}).get("id")),
-        home_name=str((payload.get("homeTeam") or {}).get("name") or "Unknown home team"),
-        away_provider_id=str((payload.get("awayTeam") or {}).get("id")),
-        away_name=str((payload.get("awayTeam") or {}).get("name") or "Unknown away team"),
+        home_provider_id=str(home_team["id"]),
+        home_name=str(home_team["name"]),
+        away_provider_id=str(away_team["id"]),
+        away_name=str(away_team["name"]),
         kickoff_at=_parse_dt(payload.get("utcDate")),
         status=_status(status),
         status_detail=status or None,
-        home_score=full_time.get("home") if full_time.get("home") is not None else current.get("home"),
-        away_score=full_time.get("away") if full_time.get("away") is not None else current.get("away"),
+        home_score=full_time.get("home") if full_time.get("home") is not None else half_time.get("home"),
+        away_score=full_time.get("away") if full_time.get("away") is not None else half_time.get("away"),
         period=str(payload.get("stage")) if payload.get("stage") else None,
         clock=f"{minute}'" if minute is not None else None,
         raw=payload,
@@ -111,6 +121,7 @@ class FootballDataProvider:
         self.last_latency_ms: float | None = None
         self.last_status_code: int | None = None
         self.last_rate_limit_remaining: int | None = None
+        self.last_external_request = False
         self.calls_today = 0
         self.last_cache_hit = False
 
@@ -206,6 +217,7 @@ class FootballDataProvider:
 
     async def _request(self, path: str, params: dict[str, Any] | None = None, *, ttl: int = 300) -> dict[str, Any]:
         self.last_cache_hit = False
+        self.last_external_request = False
         self.last_error = None
         self.last_status_code = None
         cache_key = f"{self.name}:{path}:{sorted((params or {}).items())}"
@@ -218,31 +230,54 @@ class FootballDataProvider:
                 return cached
         if not self.configured:
             self.last_error = "Provider not configured"
-            raise FootballDataError(self.last_error)
+            raise FootballDataError(self.last_error, category="missing", reason_code="provider_not_configured")
         reservation = self.quota.reserve(self.name, path) if self.quota is not None else None
         if self.quota is not None and reservation is None:
             self.last_status_code = 429
             self.last_error = "Configured quota limit reached"
-            raise FootballDataError(self.last_error, 429)
+            raise FootballDataError(self.last_error, 429, category="quota_exhausted", reason_code="request_quota_exhausted")
         started = perf_counter()
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(f"{self.base_url}/{path.lstrip('/')}", params=params, headers={"X-Auth-Token": self.key or ""})
+            self.last_external_request = True
             self.last_latency_ms = round((perf_counter() - started) * 1000, 2)
             self.last_status_code = response.status_code
             remaining = response.headers.get("X-Requests-Available-Minute")
             self.last_rate_limit_remaining = int(remaining) if remaining and remaining.isdigit() else None
             if response.status_code >= 400:
                 self.last_error = f"Provider returned HTTP {response.status_code}"
-                raise FootballDataError(self.last_error, response.status_code)
+                if response.status_code == 401:
+                    category, reason = "authentication_failed", "authentication_failed"
+                elif response.status_code == 403:
+                    category, reason = "plan_restricted", "restricted_resource"
+                elif response.status_code == 429:
+                    category = "quota_exhausted" if self.last_rate_limit_remaining == 0 else "rate_limited"
+                    reason = "rate_limit_exhausted" if category == "quota_exhausted" else "provider_rate_limited"
+                elif response.status_code >= 500:
+                    category, reason = "provider_unavailable", "provider_http_5xx"
+                else:
+                    category, reason = "provider_error", f"provider_http_{response.status_code}"
+                raise FootballDataError(self.last_error, response.status_code, category=category, reason_code=reason, external_request=True)
             payload = response.json()
+            if path.rstrip("/") == "matches" and (not isinstance(payload, dict) or not isinstance(payload.get("matches"), list)):
+                self.last_error = "Provider response was malformed"
+                raise FootballDataError(self.last_error, self.last_status_code, category="malformed_response", reason_code="matches_payload_malformed", external_request=True)
             self.last_success_at = datetime.now(timezone.utc)
             if self.cache is not None:
                 self.cache.set(cache_key, payload, ttl)
             return payload
-        except (httpx.HTTPError, ValueError) as exc:
+        except FootballDataError:
+            raise
+        except httpx.TimeoutException as exc:
+            self.last_error = "Provider request timed out"
+            raise FootballDataError(self.last_error, category="transport_failure", reason_code="provider_timeout", external_request=self.last_external_request) from exc
+        except httpx.HTTPError as exc:
             self.last_error = "Provider request failed"
-            raise FootballDataError(self.last_error) from exc
+            raise FootballDataError(self.last_error, category="transport_failure", reason_code="provider_request_failed", external_request=self.last_external_request) from exc
+        except (TypeError, ValueError) as exc:
+            self.last_error = "Provider response was malformed"
+            raise FootballDataError(self.last_error, self.last_status_code, category="malformed_response", reason_code="matches_payload_malformed", external_request=self.last_external_request) from exc
         finally:
             if self.quota is not None:
                 self.quota.record(self.name, reservation)
@@ -251,11 +286,14 @@ class FootballDataProvider:
                     self.calls_today += 1
 
     async def fixtures_by_date(self, date: str, league: str | None = None, season: str | None = None) -> list[NormalizedFixture]:
-        params: dict[str, Any] = {"dateFrom": date, "dateTo": date}
+        return await self.fixtures_by_window(date, date, league=league, season=season)
+
+    async def fixtures_by_window(self, date_from: str, date_to: str, *, league: str | None = None, season: str | None = None) -> list[NormalizedFixture]:
+        params: dict[str, Any] = {"dateFrom": date_from, "dateTo": date_to}
         if league:
             params["competitions"] = league
         payload = await self._request("matches", params)
-        return [normalize_match(item) for item in payload.get("matches", [])]
+        return [normalize_match(item) for item in payload["matches"]]
 
     async def live_fixtures(self) -> list[NormalizedFixture]:
         payload = await self._request("matches", {"status": "IN_PLAY,PAUSED"}, ttl=15)

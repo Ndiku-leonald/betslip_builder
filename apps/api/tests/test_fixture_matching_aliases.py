@@ -62,3 +62,16 @@ def test_duplicate_canonical_fixtures_are_ambiguous():
         "kickoff_at": known["kickoff_at"],
     }
     assert match_fixture(candidate, [known, dict(known)])["status"] == "ambiguous"
+
+
+def test_coventry_newcastle_upcoming_match():
+    known = _fixture("Coventry City FC", "Newcastle United FC")
+    candidate = {
+        "home": "Coventry City",
+        "away": "Newcastle United",
+        "competition": "soccer_epl",
+        "kickoff_at": known["kickoff_at"],
+    }
+    result = match_fixture(candidate, [known])
+    assert result["status"] == "matched"
+    assert result["match"] == known

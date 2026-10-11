@@ -936,9 +936,20 @@ async def refresh_odds(sport_key: str = Query(..., min_length=2, max_length=80),
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
         known = {"home": fixture_out.home, "away": fixture_out.away, "competition": fixture_out.competition, "kickoff_at": fixture_out.kickoff_at}
-        matched = next((event for event in events if match_fixture({"home": event.get("home_team"), "away": event.get("away_team"), "competition": sport_key, "kickoff_at": _parse_dt(event.get("commence_time"))}, [known])["status"] == "matched"), None)
-        if matched is None:
-            raise HTTPException(409, "No unambiguous odds event matched the canonical fixture")
+        if sport_key != "soccer_epl" or sport_slug != "football":
+            raise HTTPException(400, "Fixture and odds sport must both be EPL football")
+        if fixture.status not in {"scheduled", "not_started", "upcoming"}:
+            raise HTTPException(409, "Odds persistence is restricted to upcoming fixtures")
+        candidates = [
+            event for event in events
+            if match_fixture({
+                "home": event.get("home_team"), "away": event.get("away_team"),
+                "competition": sport_key, "kickoff_at": _parse_dt(event.get("commence_time")),
+            }, [known])["status"] == "matched"
+        ]
+        if len(candidates) != 1:
+            raise HTTPException(409, "Expected exactly one unambiguous odds event for this fixture")
+        matched = candidates[0]
         markets_found = parse_the_odds_api([matched], fixture.id, sport_slug, odds_provider.name)
         stored = persist_market_snapshots(db, markets_found)
         return {"provider": odds_provider.name, "stored": stored, "fixture_id": fixture.id, "source_event_id": matched.get("id")}

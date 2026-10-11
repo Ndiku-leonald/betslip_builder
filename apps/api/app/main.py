@@ -954,6 +954,75 @@ async def refresh_odds(sport_key: str = Query(..., min_length=2, max_length=80),
     return {"provider": odds_provider.name, "events": len(events), "markets": len(markets_found), "stored": 0, "reason": "pass an internal fixture_id after canonical event matching"}
 
 
+@app.post("/admin/odds/matching-preview")
+async def preview_canonical_odds_matching(
+    sport_key: str = Query("soccer_epl", min_length=2, max_length=80),
+    db: Session = Depends(get_db),
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """One provider request; read-only, conservative odds-to-fixture matching preview."""
+    if sport_key != "soccer_epl":
+        raise HTTPException(400, "Only soccer_epl is supported by this commissioning preview")
+    if odds_provider is None or not odds_provider.configured:
+        raise HTTPException(503, "The Odds API is not configured")
+    try:
+        events = await odds_provider.list_events(sport_key)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+    football_id = db.scalar(select(Sport.id).where(Sport.slug == "football"))
+    fixtures = list(db.scalars(select(Fixture).where(Fixture.sport_id == football_id))) if football_id else []
+    canonical = []
+    for fixture in fixtures:
+        detail = _fixture_out(db, fixture)
+        if detail.competition and detail.competition.casefold() not in {"premier league", "pl"}:
+            continue
+        canonical.append({
+            "id": fixture.id, "home": detail.home, "away": detail.away,
+            "competition": detail.competition, "kickoff_at": detail.kickoff_at,
+            "status": detail.status,
+        })
+
+    matched = []
+    unmatched = []
+    ambiguous = []
+    for event in events:
+        candidate = {
+            "home": event.get("home_team"), "away": event.get("away_team"),
+            "competition": sport_key, "kickoff_at": _parse_dt(event.get("commence_time")),
+        }
+        result = match_fixture(candidate, canonical)
+        item = {
+            "event_id": event.get("id"), "home": candidate["home"],
+            "away": candidate["away"], "kickoff_at": event.get("commence_time"),
+        }
+        if result["status"] == "matched":
+            match = result["match"]
+            matched.append({**item, "fixture_id": match["id"], "confidence": result["confidence"]})
+        elif result.get("matches"):
+            ambiguous.append(item)
+        else:
+            unmatched.append(item)
+
+    # Never accept two distinct upstream events for the same canonical fixture.
+    counts = {}
+    for item in matched:
+        counts[item["fixture_id"]] = counts.get(item["fixture_id"], 0) + 1
+    collisions = {fixture_id for fixture_id, count in counts.items() if count > 1}
+    if collisions:
+        ambiguous.extend(item for item in matched if item["fixture_id"] in collisions)
+        matched = [item for item in matched if item["fixture_id"] not in collisions]
+
+    return {
+        "provider": odds_provider.name, "sport_key": sport_key,
+        "events": len(events), "canonical_fixtures": len(canonical),
+        "matched_count": len(matched), "unmatched_count": len(unmatched),
+        "ambiguous_count": len(ambiguous),
+        "matched": matched, "unmatched": unmatched, "ambiguous": ambiguous,
+        "stored": 0, "dry_run": True,
+    }
+
+
 @app.get("/api/providers/status", response_model=list[ProviderStatus])
 def provider_status(db: Session = Depends(get_db)) -> list[ProviderStatus]:
     result = []

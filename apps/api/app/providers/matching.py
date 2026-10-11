@@ -7,8 +7,66 @@ from datetime import datetime
 from typing import Any
 
 
+_TEAM_ALIASES = {
+    "arsenal": "arsenal",
+    "arsenalfc": "arsenal",
+    "astonvilla": "astonvilla",
+    "astonvillafc": "astonvilla",
+    "bournemouth": "bournemouth",
+    "afcbournemouth": "bournemouth",
+    "brentford": "brentford",
+    "brentfordfc": "brentford",
+    "brighton": "brighton",
+    "brightonandhovealbion": "brighton",
+    "brightonhovealbion": "brighton",
+    "brightonhovealbionfc": "brighton",
+    "chelsea": "chelsea",
+    "chelseafc": "chelsea",
+    "crystalpalace": "crystalpalace",
+    "crystalpalacefc": "crystalpalace",
+    "everton": "everton",
+    "evertonfc": "everton",
+    "fulham": "fulham",
+    "fulhamfc": "fulham",
+    "ipswich": "ipswichtown",
+    "ipswichtown": "ipswichtown",
+    "ipswichtownfc": "ipswichtown",
+    "leeds": "leedsunited",
+    "leedsunited": "leedsunited",
+    "leedsunitedfc": "leedsunited",
+    "liverpool": "liverpool",
+    "liverpoolfc": "liverpool",
+    "mancity": "manchestercity",
+    "manchestercity": "manchestercity",
+    "manchestercityfc": "manchestercity",
+    "manutd": "manchesterunited",
+    "manunited": "manchesterunited",
+    "manchesterunited": "manchesterunited",
+    "manchesterunitedfc": "manchesterunited",
+    "newcastle": "newcastleunited",
+    "newcastleunited": "newcastleunited",
+    "newcastleunitedfc": "newcastleunited",
+    "nottinghamforest": "nottinghamforest",
+    "nottinghamforestfc": "nottinghamforest",
+    "sunderland": "sunderland",
+    "sunderlandafc": "sunderland",
+    "tottenham": "tottenhamhotspur",
+    "tottenhamhotspur": "tottenhamhotspur",
+    "tottenhamhotspurfc": "tottenhamhotspur",
+    "spurs": "tottenhamhotspur",
+    "westham": "westhamunited",
+    "westhamunited": "westhamunited",
+    "westhamunitedfc": "westhamunited",
+    "wolves": "wolverhamptonwanderers",
+    "wolverhampton": "wolverhamptonwanderers",
+    "wolverhamptonwanderers": "wolverhamptonwanderers",
+    "wolverhamptonwanderersfc": "wolverhamptonwanderers",
+}
+
+
 def normalize_team_name(value: str | None) -> str:
-    return re.sub(r"[^a-z0-9]", "", (value or "").casefold())
+    normalized = re.sub(r"[^a-z0-9]", "", (value or "").casefold())
+    return _TEAM_ALIASES.get(normalized, normalized)
 
 
 def _time_distance(left: datetime | None, right: datetime | None) -> float | None:

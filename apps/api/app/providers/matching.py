@@ -22,6 +22,8 @@ _TEAM_ALIASES = {
     "brightonhovealbionfc": "brighton",
     "chelsea": "chelsea",
     "chelseafc": "chelsea",
+    "coventrycity": "coventrycity",
+    "coventrycityfc": "coventrycity",
     "crystalpalace": "crystalpalace",
     "crystalpalacefc": "crystalpalace",
     "everton": "everton",

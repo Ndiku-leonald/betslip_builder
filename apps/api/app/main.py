@@ -936,13 +936,15 @@ async def refresh_odds(sport_key: str = Query(..., min_length=2, max_length=80),
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
         known = {"home": fixture_out.home, "away": fixture_out.away, "competition": fixture_out.competition, "kickoff_at": fixture_out.kickoff_at}
-        if sport_key != "soccer_epl" or sport_slug != "football":
+        if sport_key != "soccer_epl" or sport_slug != "football" or (fixture_out.competition or "").casefold() not in {"premier league", "pl"}:
             raise HTTPException(400, "Fixture and odds sport must both be EPL football")
+        if fixture_out.kickoff_at is None:
+            raise HTTPException(409, "Canonical kickoff is required for odds matching")
         if fixture.status not in {"scheduled", "not_started", "upcoming"}:
             raise HTTPException(409, "Odds persistence is restricted to upcoming fixtures")
         candidates = [
             event for event in events
-            if match_fixture({
+            if _parse_dt(event.get("commence_time")) is not None and match_fixture({
                 "home": event.get("home_team"), "away": event.get("away_team"),
                 "competition": sport_key, "kickoff_at": _parse_dt(event.get("commence_time")),
             }, [known])["status"] == "matched"
@@ -1002,7 +1004,7 @@ async def preview_canonical_odds_matching(
             "home": event.get("home_team"), "away": event.get("away_team"),
             "competition": sport_key, "kickoff_at": _parse_dt(event.get("commence_time")),
         }
-        result = match_fixture(candidate, canonical)
+        result = match_fixture(candidate, canonical) if candidate["kickoff_at"] is not None else {"status": "ambiguous", "matches": []}
         item = {
             "event_id": event.get("id"), "home": candidate["home"],
             "away": candidate["away"], "kickoff_at": event.get("commence_time"),
